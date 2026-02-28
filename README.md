@@ -127,11 +127,27 @@ It asks whether to:
 - remove the project service (`systemd`)
 - remove project workspace state (`./.cognal`)
 - remove global CLI link (`npm unlink -g cognal`)
+- remove provider CLIs (`claude`, `codex`)
 
 Non-interactive:
 
 ```bash
 cognal uninstall --yes --remove-workspace --remove-global
+```
+
+Full wipe (no prompts):
+
+```bash
+cognal uninstall --all
+```
+
+Provider-only CLI cleanup:
+
+```bash
+cognal uninstall --yes --remove-providers
+# or individually:
+cognal uninstall --yes --remove-claude-cli
+cognal uninstall --yes --remove-codex-cli
 ```
 
 ## Public encrypted QR mode

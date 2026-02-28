@@ -852,27 +852,49 @@ program
 
 program
   .command("uninstall")
-  .description("Remove Cognal service and optionally workspace/global installation")
+  .description("Remove Cognal service and optionally workspace/global/provider installations")
   .option("--yes", "Skip interactive prompts and use defaults", false)
   .option("--remove-workspace", "Remove .cognal directory in project root", false)
   .option("--remove-global", "Run npm unlink -g cognal", false)
+  .option("--remove-claude-cli", "Run npm uninstall -g @anthropic-ai/claude-code", false)
+  .option("--remove-codex-cli", "Run npm uninstall -g @openai/codex", false)
+  .option("--remove-providers", "Remove both provider CLIs (Claude + Codex)", false)
+  .option("--all", "Remove service, workspace, global Cognal link, and provider CLIs", false)
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
     const { paths, cfg } = await loadProjectConfig(projectRoot);
+    const hasClaudeCli = await commandExists("claude");
+    const hasCodexCli = await commandExists("codex");
 
-    const removeService = opts.yes
+    const removeService = opts.all
+      ? true
+      : opts.yes
       ? true
       : await promptYesNo(`Remove systemd service '${cfg.runtime.serviceName}'?`, true);
-    const removeWorkspace = opts.removeWorkspace
+    const removeWorkspace = opts.all || opts.removeWorkspace
       ? true
       : opts.yes
         ? false
         : await promptYesNo(`Remove workspace state '${paths.cognalDir}'?`, false);
-    const removeGlobal = opts.removeGlobal
+    const removeGlobal = opts.all || opts.removeGlobal
       ? true
       : opts.yes
         ? false
         : await promptYesNo("Remove global CLI link (npm unlink -g cognal)?", false);
+    const removeClaudeCli = opts.all || opts.removeProviders || opts.removeClaudeCli
+      ? true
+      : opts.yes
+        ? false
+        : hasClaudeCli
+          ? await promptYesNo("Remove Claude CLI (npm uninstall -g @anthropic-ai/claude-code)?", false)
+          : false;
+    const removeCodexCli = opts.all || opts.removeProviders || opts.removeCodexCli
+      ? true
+      : opts.yes
+        ? false
+        : hasCodexCli
+          ? await promptYesNo("Remove Codex CLI (npm uninstall -g @openai/codex)?", false)
+          : false;
 
     if (removeService) {
       await uninstallSystemdUnit(cfg);
@@ -887,6 +909,22 @@ program
         process.stdout.write("Warning: global unlink may have failed\n");
       } else {
         process.stdout.write("Removed global cognal link\n");
+      }
+    }
+    if (removeClaudeCli) {
+      const code = await runInteractiveCommand("bash", ["-lc", "npm uninstall -g @anthropic-ai/claude-code"]);
+      if (code !== 0) {
+        process.stdout.write("Warning: Claude CLI uninstall may have failed\n");
+      } else {
+        process.stdout.write("Removed Claude CLI\n");
+      }
+    }
+    if (removeCodexCli) {
+      const code = await runInteractiveCommand("bash", ["-lc", "npm uninstall -g @openai/codex"]);
+      if (code !== 0) {
+        process.stdout.write("Warning: Codex CLI uninstall may have failed\n");
+      } else {
+        process.stdout.write("Removed Codex CLI\n");
       }
     }
     process.stdout.write("Uninstall complete.\n");
