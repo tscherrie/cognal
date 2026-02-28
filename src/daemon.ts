@@ -95,6 +95,11 @@ async function processInboundEvent(args: {
 }): Promise<void> {
   const { event, db, manager, signal, stt, cfg, paths } = args;
 
+  // Ignore sync echoes that originated from non-primary linked devices (e.g. this server device).
+  if (event.isSyncSent && event.sourceDevice !== undefined && event.sourceDevice !== 1) {
+    return;
+  }
+
   const user = await db.getUserByPhone(event.source);
   if (!user) {
     logger.warn("message from unauthorized source", { source: event.source });
@@ -169,7 +174,6 @@ async function processInboundEvent(args: {
 
   const finalPrompt = parts.join("\n\n").trim();
   if (!finalPrompt) {
-    await signal.sendMessage(event.source, "Empty message received.");
     return;
   }
 

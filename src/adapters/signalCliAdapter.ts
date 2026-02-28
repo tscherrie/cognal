@@ -4,6 +4,8 @@ import { runCommand } from "../core/utils.js";
 
 export interface SignalInboundEvent {
   source: string;
+  sourceDevice?: number;
+  isSyncSent: boolean;
   text: string;
   signalMessageId: string;
   attachments: Array<{
@@ -33,7 +35,9 @@ function parseJsonLines(input: string): unknown[] {
 function normalizeEvent(raw: any): SignalInboundEvent | null {
   const envelope = raw?.envelope ?? raw;
   const source = envelope?.sourceNumber ?? envelope?.source ?? envelope?.sourceUuid;
-  const dataMessage = envelope?.dataMessage ?? raw?.dataMessage;
+  const sourceDevice = typeof envelope?.sourceDevice === "number" ? envelope.sourceDevice : undefined;
+  const sentMessage = envelope?.syncMessage?.sentMessage ?? raw?.syncMessage?.sentMessage;
+  const dataMessage = envelope?.dataMessage ?? raw?.dataMessage ?? sentMessage;
   const text = dataMessage?.message ?? "";
 
   if (!source) {
@@ -58,8 +62,10 @@ function normalizeEvent(raw: any): SignalInboundEvent | null {
 
   return {
     source,
+    sourceDevice,
+    isSyncSent: Boolean(sentMessage),
     text,
-    signalMessageId: String(envelope?.timestamp ?? Date.now()),
+    signalMessageId: String(dataMessage?.timestamp ?? envelope?.timestamp ?? Date.now()),
     attachments
   };
 }

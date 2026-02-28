@@ -105,3 +105,74 @@ describe("SignalCliAdapter createDeviceLinkSession", () => {
     await expect(sessionPromise).rejects.toThrow("signal-cli link failed");
   });
 });
+
+describe("SignalCliAdapter receive", () => {
+  beforeEach(() => {
+    runCommandMock.mockReset();
+  });
+
+  it("parses regular inbound dataMessage events", async () => {
+    runCommandMock.mockResolvedValue({
+      code: 0,
+      stdout: JSON.stringify({
+        envelope: {
+          sourceNumber: "+4915123456789",
+          sourceDevice: 1,
+          timestamp: 1700000000000,
+          dataMessage: {
+            message: "hello",
+            attachments: []
+          }
+        }
+      }),
+      stderr: ""
+    });
+
+    const adapter = new SignalCliAdapter("signal-cli", "/tmp/signal", undefined);
+    const events = await adapter.receive(5);
+    expect(events).toEqual([
+      {
+        source: "+4915123456789",
+        sourceDevice: 1,
+        isSyncSent: false,
+        text: "hello",
+        signalMessageId: "1700000000000",
+        attachments: []
+      }
+    ]);
+  });
+
+  it("parses syncMessage sentMessage events used for linked-device chat", async () => {
+    runCommandMock.mockResolvedValue({
+      code: 0,
+      stdout: JSON.stringify({
+        envelope: {
+          sourceNumber: "+4915123456789",
+          sourceDevice: 1,
+          timestamp: 1700000000100,
+          syncMessage: {
+            sentMessage: {
+              timestamp: 1700000000200,
+              message: "/codex",
+              attachments: []
+            }
+          }
+        }
+      }),
+      stderr: ""
+    });
+
+    const adapter = new SignalCliAdapter("signal-cli", "/tmp/signal", undefined);
+    const events = await adapter.receive(5);
+    expect(events).toEqual([
+      {
+        source: "+4915123456789",
+        sourceDevice: 1,
+        isSyncSent: true,
+        text: "/codex",
+        signalMessageId: "1700000000200",
+        attachments: []
+      }
+    ]);
+  });
+});
