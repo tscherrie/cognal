@@ -129,7 +129,7 @@ export class Db {
     `);
   }
 
-  async addUser(phoneE164: string, email: string): Promise<UserRecord> {
+  async addUser(phoneE164: string, email: string, defaultActiveAgent: AgentType = "codex"): Promise<UserRecord> {
     const now = new Date().toISOString();
     const id = randomUUID();
     await this.run(
@@ -139,8 +139,8 @@ export class Db {
     );
     await this.run(
       `INSERT INTO bindings (user_id, active_agent, claude_session_ref, codex_session_ref, updated_at)
-       VALUES (?, 'codex', NULL, NULL, ?)` ,
-      [id, now]
+       VALUES (?, ?, NULL, NULL, ?)` ,
+      [id, defaultActiveAgent, now]
     );
     return {
       id,
@@ -223,7 +223,7 @@ export class Db {
     await this.run(`UPDATE users SET signal_account_id = ?, status = 'active' WHERE id = ?`, [signalAccountId, userId]);
   }
 
-  async getBinding(userId: string): Promise<SessionBinding> {
+  async getBinding(userId: string, defaultActiveAgent: AgentType = "codex"): Promise<SessionBinding> {
     const row = await this.get<{
       user_id: string;
       active_agent: AgentType;
@@ -235,12 +235,12 @@ export class Db {
       const now = new Date().toISOString();
       await this.run(
         `INSERT INTO bindings (user_id, active_agent, claude_session_ref, codex_session_ref, updated_at)
-         VALUES (?, 'codex', NULL, NULL, ?)` ,
-        [userId, now]
+         VALUES (?, ?, NULL, NULL, ?)` ,
+        [userId, defaultActiveAgent, now]
       );
       return {
         userId,
-        activeAgent: "codex",
+        activeAgent: defaultActiveAgent,
         claudeSessionRef: null,
         codexSessionRef: null,
         updatedAt: now

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { promises as fs } from "node:fs";
 import process from "node:process";
-import { loadOrCreateConfig, getRuntimePaths, ensureRuntimeDirs } from "./config.js";
+import { loadOrCreateConfig, getRuntimePaths, ensureRuntimeDirs, getDefaultAgent, getEnabledAgents, isAgentEnabled } from "./config.js";
 import { Db } from "./core/db.js";
 import { Logger } from "./core/logger.js";
 import { routeTextInput } from "./core/router.js";
@@ -12,7 +12,7 @@ import { SttAdapter } from "./adapters/sttAdapter.js";
 import { ClaudeAdapter } from "./agents/claudeAdapter.js";
 import { CodexAdapter } from "./agents/codexAdapter.js";
 import { AgentManager } from "./agents/manager.js";
-import type { InboundAttachment } from "./types.js";
+import type { AgentType, InboundAttachment } from "./types.js";
 
 const logger = new Logger("daemon");
 
@@ -29,16 +29,26 @@ async function main(): Promise<void> {
   const openAiKey = process.env[cfg.stt.apiKeyEnv];
   const stt = openAiKey ? new SttAdapter(openAiKey) : null;
 
+  const enabledAgents = getEnabledAgents(cfg);
+  if (enabledAgents.length === 0) {
+    throw new Error("No agent provider is enabled. Update .cognal/config.toml.");
+  }
+  const adapters: Partial<Record<AgentType, ClaudeAdapter | CodexAdapter>> = {};
+  if (cfg.agents.enabled.claude) {
+    adapters.claude = new ClaudeAdapter(cfg.agents.claude.command, cfg.agents.claude.args);
+  }
+  if (cfg.agents.enabled.codex) {
+    adapters.codex = new CodexAdapter(cfg.agents.codex.command, cfg.agents.codex.args);
+  }
+
   const manager = new AgentManager(
     db,
+    adapters,
     {
-      claude: new ClaudeAdapter(cfg.agents.claude.command, cfg.agents.claude.args),
-      codex: new CodexAdapter(cfg.agents.codex.command, cfg.agents.codex.args)
-    },
-    {
-      failoverEnabled: cfg.routing.failoverEnabled,
+      failoverEnabled: cfg.routing.failoverEnabled && enabledAgents.length > 1,
       agentResponseSec: cfg.timeouts.agentResponseSec,
-      agentIdleMs: cfg.timeouts.agentIdleMs
+      agentIdleMs: cfg.timeouts.agentIdleMs,
+      defaultAgent: getDefaultAgent(cfg)
     }
   );
 
@@ -122,6 +132,10 @@ async function processInboundEvent(args: {
   const route = routeTextInput(event.text || "");
 
   if (route.type === "switch_agent") {
+    if (!isAgentEnabled(cfg, route.agent)) {
+      await signal.sendMessage(event.source, `Agent '${route.agent}' is disabled on this host.`);
+      return;
+    }
     await manager.switchAgent(user.id, route.agent);
     await signal.sendMessage(event.source, `Switched active agent to ${route.agent}.`);
     return;

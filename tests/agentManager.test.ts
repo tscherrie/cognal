@@ -97,7 +97,7 @@ describe("AgentManager", () => {
     const manager = new AgentManager(
       db as any,
       { codex, claude },
-      { failoverEnabled: true, agentResponseSec: 10, agentIdleMs: 10 }
+      { failoverEnabled: true, agentResponseSec: 10, agentIdleMs: 10, defaultAgent: "codex" }
     );
 
     await manager.switchAgent("u1", "codex");
@@ -119,7 +119,7 @@ describe("AgentManager", () => {
     const manager = new AgentManager(
       db as any,
       { codex, claude },
-      { failoverEnabled: true, agentResponseSec: 10, agentIdleMs: 10 }
+      { failoverEnabled: true, agentResponseSec: 10, agentIdleMs: 10, defaultAgent: "codex" }
     );
 
     const output = await manager.sendToActive("u1", "hello");
@@ -127,5 +127,17 @@ describe("AgentManager", () => {
     expect(output.text).toContain("Failover -> claude");
     expect(output.text).toContain("fallback-response");
     expect(db.binding.activeAgent).toBe("claude");
+  });
+
+  it("rejects switching to disabled provider", async () => {
+    const db = new FakeDb();
+    const codex = new FakeAdapter("codex");
+    const manager = new AgentManager(
+      db as any,
+      { codex },
+      { failoverEnabled: false, agentResponseSec: 10, agentIdleMs: 10, defaultAgent: "codex" }
+    );
+
+    await expect(manager.switchAgent("u1", "claude")).rejects.toThrow("disabled");
   });
 });

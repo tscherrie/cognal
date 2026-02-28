@@ -4,17 +4,70 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { createInterface } from "node:readline/promises";
 import QRCode from "qrcode";
-import { loadOrCreateConfig, getRuntimePaths, ensureRuntimeDirs, saveConfig } from "./config.js";
+import {
+  loadOrCreateConfig,
+  getRuntimePaths,
+  ensureRuntimeDirs,
+  saveConfig,
+  enabledFromProviderSelection,
+  providerSelectionFromEnabled,
+  getDefaultAgent,
+  isAgentEnabled
+} from "./config.js";
 import { Db } from "./core/db.js";
 import { commandExists, runCommand, safeFileName } from "./core/utils.js";
 import { Logger } from "./core/logger.js";
 import type { HealthCheckResult } from "./types.js";
+import type { CognalConfig, ProviderSelection } from "./config.js";
 import { SignalCliAdapter } from "./adapters/signalCliAdapter.js";
 import { DeliveryAdapter } from "./adapters/deliveryAdapter.js";
 
 const logger = new Logger("cli");
 type DeliveryMode = "email" | "link" | "public_encrypted";
+
+function parseProviderSelection(value: string): ProviderSelection {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "claude" || normalized === "codex" || normalized === "both") {
+    return normalized;
+  }
+  throw new Error(`Unknown provider selection '${value}'. Use: claude, codex, both`);
+}
+
+async function promptProviderSelection(defaultSelection: ProviderSelection): Promise<ProviderSelection> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return defaultSelection;
+  }
+
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  try {
+    process.stdout.write("Choose provider mode:\n");
+    process.stdout.write("  1) codex\n");
+    process.stdout.write("  2) claude\n");
+    process.stdout.write("  3) both\n");
+    const answer = (await rl.question(`Providers [${defaultSelection}]: `)).trim().toLowerCase();
+    if (!answer) {
+      return defaultSelection;
+    }
+    if (answer === "1") {
+      return "codex";
+    }
+    if (answer === "2") {
+      return "claude";
+    }
+    if (answer === "3") {
+      return "both";
+    }
+    return parseProviderSelection(answer);
+  } finally {
+    rl.close();
+  }
+}
 
 function resolveProjectRoot(input?: string): string {
   return input ? path.resolve(input) : process.cwd();
@@ -100,9 +153,15 @@ async function runProviderSetup(command: string): Promise<void> {
   });
 }
 
-async function doctorChecks(projectRoot: string): Promise<HealthCheckResult[]> {
+async function doctorChecks(projectRoot: string, cfg: CognalConfig): Promise<HealthCheckResult[]> {
   const checks: HealthCheckResult[] = [];
-  const binaries = ["node", "npm", "java", "systemctl", "signal-cli", "claude", "codex"];
+  const binaries = ["node", "npm", "java", "systemctl", "signal-cli"];
+  if (cfg.agents.enabled.claude) {
+    binaries.push("claude");
+  }
+  if (cfg.agents.enabled.codex) {
+    binaries.push("codex");
+  }
   for (const bin of binaries) {
     const ok = await commandExists(bin);
     checks.push({
@@ -212,25 +271,37 @@ program
   .command("setup")
   .option("--run-provider-setup", "Run native Claude/Codex setup flows", false)
   .option("--distro <ubuntu|debian>", "Set distro in config")
+  .option("--providers <claude|codex|both>", "Enabled providers")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
     const { db, paths, cfg } = await getConfigAndDb(projectRoot);
 
+    const defaultProviders = providerSelectionFromEnabled(cfg.agents.enabled);
+    const selectedProviders = opts.providers
+      ? parseProviderSelection(opts.providers)
+      : await promptProviderSelection(defaultProviders);
+    cfg.agents.enabled = enabledFromProviderSelection(selectedProviders);
+
     if (opts.distro) {
       cfg.runtime.distro = opts.distro;
-      await saveConfig(paths, cfg);
     }
+    await saveConfig(paths, cfg);
+    process.stdout.write(`Provider mode: ${selectedProviders}\n`);
 
-    const checks = await doctorChecks(projectRoot);
+    const checks = await doctorChecks(projectRoot, cfg);
     for (const check of checks) {
       process.stdout.write(`${check.ok ? "[OK]" : "[WARN]"} ${check.name} -> ${check.details}\n`);
     }
 
     if (opts.runProviderSetup) {
-      process.stdout.write("Running native Claude setup...\n");
-      await runProviderSetup(cfg.agents.claude.command);
-      process.stdout.write("Running native Codex setup...\n");
-      await runProviderSetup(cfg.agents.codex.command);
+      if (cfg.agents.enabled.claude) {
+        process.stdout.write("Running native Claude setup...\n");
+        await runProviderSetup(cfg.agents.claude.command);
+      }
+      if (cfg.agents.enabled.codex) {
+        process.stdout.write("Running native Codex setup...\n");
+        await runProviderSetup(cfg.agents.codex.command);
+      }
     }
 
     await installSystemdUnit(projectRoot);
@@ -292,7 +363,12 @@ async function userAddAction(phone: string, email: string, deliver: string | und
 
   let user = await db.getUserByPhone(phone);
   if (!user) {
-    user = await db.addUser(phone, email);
+    user = await db.addUser(phone, email, getDefaultAgent(cfg));
+  } else {
+    const binding = await db.getBinding(user.id, getDefaultAgent(cfg));
+    if (!isAgentEnabled(cfg, binding.activeAgent)) {
+      await db.setActiveAgent(user.id, getDefaultAgent(cfg));
+    }
   }
 
   const signal = new SignalCliAdapter(cfg.signal.command, cfg.signal.dataDir, cfg.signal.account);
@@ -351,6 +427,10 @@ async function userRelinkAction(phone: string, deliver: string | undefined, proj
   const user = await db.getUserByPhone(phone);
   if (!user) {
     throw new Error(`Unknown user: ${phone}`);
+  }
+  const binding = await db.getBinding(user.id, getDefaultAgent(cfg));
+  if (!isAgentEnabled(cfg, binding.activeAgent)) {
+    await db.setActiveAgent(user.id, getDefaultAgent(cfg));
   }
 
   await db.setUserStatus(user.id, "pending");
@@ -444,7 +524,10 @@ program
   .command("doctor")
   .action(async (_, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
-    const checks = await doctorChecks(projectRoot);
+    const paths = getRuntimePaths(projectRoot);
+    await ensureRuntimeDirs(paths);
+    const cfg = await loadOrCreateConfig(paths);
+    const checks = await doctorChecks(projectRoot, cfg);
     let hasFail = false;
     for (const check of checks) {
       process.stdout.write(`${check.ok ? "[OK]" : "[WARN]"} ${check.name}: ${check.details}\n`);
@@ -461,14 +544,23 @@ program
   .command("update")
   .action(async (_, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const paths = getRuntimePaths(projectRoot);
+    await ensureRuntimeDirs(paths);
+    const cfg = await loadOrCreateConfig(paths);
     const steps: Array<{ title: string; command: string }> = [
-      { title: "Update Cognal repository", command: `cd '${projectRoot}' && git fetch --all && git pull --ff-only` },
-      { title: "Update Claude", command: "claude update" },
-      { title: "Update Codex", command: "npm i -g @openai/codex@latest" },
+      { title: "Update Cognal repository", command: `cd '${projectRoot}' && git fetch --all && git pull --ff-only` }
+    ];
+    if (cfg.agents.enabled.claude) {
+      steps.push({ title: "Update Claude", command: "claude update" });
+    }
+    if (cfg.agents.enabled.codex) {
+      steps.push({ title: "Update Codex", command: "npm i -g @openai/codex@latest" });
+    }
+    steps.push(
       { title: "Update signal-cli", command: "sudo apt-get update && sudo apt-get install -y --only-upgrade signal-cli" },
       { title: "Restart cognald", command: "sudo systemctl restart cognald" },
       { title: "Run doctor", command: `cd '${projectRoot}' && ${process.execPath} dist/cli.js doctor` }
-    ];
+    );
 
     for (const step of steps) {
       process.stdout.write(`==> ${step.title}\n`);

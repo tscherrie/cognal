@@ -8,6 +8,7 @@ interface ManagerOptions {
   failoverEnabled: boolean;
   agentResponseSec: number;
   agentIdleMs: number;
+  defaultAgent: AgentType;
 }
 
 export class AgentManager {
@@ -16,12 +17,13 @@ export class AgentManager {
 
   constructor(
     private readonly db: Db,
-    private readonly adapters: Record<AgentType, AgentAdapter>,
+    private readonly adapters: Partial<Record<AgentType, AgentAdapter>>,
     private readonly options: ManagerOptions
   ) {}
 
   async switchAgent(userId: string, target: AgentType): Promise<void> {
-    const binding = await this.db.getBinding(userId);
+    this.requireAdapter(target);
+    const binding = await this.db.getBinding(userId, this.options.defaultAgent);
     const current = this.runtimes.get(userId);
 
     if (current && current.agent === target) {
@@ -37,18 +39,22 @@ export class AgentManager {
     }
 
     await this.db.setActiveAgent(userId, target);
-    const updatedBinding = await this.db.getBinding(userId);
+    const updatedBinding = await this.db.getBinding(userId, this.options.defaultAgent);
     const runtime = await this.startForBinding(userId, target, updatedBinding);
     this.runtimes.set(userId, runtime);
     this.logger.info("switched active agent", { userId, target });
   }
 
   async sendToActive(userId: string, input: string): Promise<AgentOutput> {
-    const binding = await this.db.getBinding(userId);
-    const runtime = await this.ensureRuntime(userId, binding.activeAgent, binding);
+    const binding = await this.db.getBinding(userId, this.options.defaultAgent);
+    const activeAgent = this.ensureAgentEnabled(binding.activeAgent);
+    if (activeAgent !== binding.activeAgent) {
+      await this.db.setActiveAgent(userId, activeAgent);
+    }
+    const runtime = await this.ensureRuntime(userId, activeAgent, binding);
 
     try {
-      const output = await this.adapters[runtime.agent].send(
+      const output = await this.requireAdapter(runtime.agent).send(
         runtime,
         input,
         this.options.agentIdleMs,
@@ -72,8 +78,11 @@ export class AgentManager {
       }
 
       const fallbackAgent = otherAgent(runtime.agent);
+      if (!this.adapters[fallbackAgent]) {
+        throw err;
+      }
       await this.db.setActiveAgent(userId, fallbackAgent);
-      const fallbackBinding = await this.db.getBinding(userId);
+      const fallbackBinding = await this.db.getBinding(userId, this.options.defaultAgent);
       const fallbackRuntime = await this.ensureRuntime(userId, fallbackAgent, fallbackBinding);
       const handoffInput = [
         "[Automatic failover from previous agent due to runtime error.]",
@@ -81,7 +90,7 @@ export class AgentManager {
         input
       ].join("\n\n");
 
-      const output = await this.adapters[fallbackRuntime.agent].send(
+      const output = await this.requireAdapter(fallbackRuntime.agent).send(
         fallbackRuntime,
         handoffInput,
         this.options.agentIdleMs,
@@ -110,6 +119,7 @@ export class AgentManager {
   }
 
   private async ensureRuntime(userId: string, agent: AgentType, binding: Awaited<ReturnType<Db["getBinding"]>>): Promise<RunningAgent> {
+    this.requireAdapter(agent);
     const existing = this.runtimes.get(userId);
     if (existing && existing.agent === agent && existing.process.exitCode === null) {
       return existing;
@@ -133,7 +143,7 @@ export class AgentManager {
     agent: AgentType,
     binding: Awaited<ReturnType<Db["getBinding"]>>
   ): Promise<RunningAgent> {
-    const adapter = this.adapters[agent];
+    const adapter = this.requireAdapter(agent);
     const sessionRef = agent === "claude" ? binding.claudeSessionRef : binding.codexSessionRef;
 
     try {
@@ -153,9 +163,24 @@ export class AgentManager {
   }
 
   private async stopRuntime(runtime: RunningAgent): Promise<string | null> {
-    const adapter = this.adapters[runtime.agent];
+    const adapter = this.requireAdapter(runtime.agent);
     const sessionRef = await adapter.stop(runtime);
     await this.db.clearRuntimePid(runtime.userId, runtime.agent);
     return sessionRef;
+  }
+
+  private requireAdapter(agent: AgentType): AgentAdapter {
+    const adapter = this.adapters[agent];
+    if (!adapter) {
+      throw new Error(`Agent '${agent}' is disabled on this host`);
+    }
+    return adapter;
+  }
+
+  private ensureAgentEnabled(agent: AgentType): AgentType {
+    if (this.adapters[agent]) {
+      return agent;
+    }
+    return this.options.defaultAgent;
   }
 }

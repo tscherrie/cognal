@@ -1,6 +1,13 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import TOML from "@iarna/toml";
+import type { AgentType } from "./types.js";
+
+export type ProviderSelection = "claude" | "codex" | "both";
+export interface EnabledAgents {
+  claude: boolean;
+  codex: boolean;
+}
 
 export interface CognalConfig {
   projectId: string;
@@ -15,6 +22,7 @@ export interface CognalConfig {
     account?: string;
   };
   agents: {
+    enabled: EnabledAgents;
     claude: {
       command: string;
       args: string[];
@@ -103,6 +111,10 @@ export function defaultConfig(projectRoot: string): CognalConfig {
       receiveTimeoutSec: 5
     },
     agents: {
+      enabled: {
+        claude: true,
+        codex: true
+      },
       claude: {
         command: "claude",
         args: []
@@ -157,7 +169,7 @@ export async function ensureRuntimeDirs(paths: RuntimePaths): Promise<void> {
 export async function loadConfig(paths: RuntimePaths): Promise<CognalConfig> {
   const raw = await fs.readFile(paths.configPath, "utf8");
   const parsed = TOML.parse(raw) as unknown as CognalConfig;
-  return parsed;
+  return normalizeConfig(parsed);
 }
 
 export async function saveConfig(paths: RuntimePaths, cfg: CognalConfig): Promise<void> {
@@ -173,4 +185,70 @@ export async function loadOrCreateConfig(paths: RuntimePaths): Promise<CognalCon
     await saveConfig(paths, cfg);
     return cfg;
   }
+}
+
+export function normalizeConfig(cfg: CognalConfig): CognalConfig {
+  const normalized = cfg;
+  if (!normalized.agents.enabled) {
+    normalized.agents.enabled = { claude: true, codex: true };
+  }
+  if (!normalized.agents.enabled.claude && !normalized.agents.enabled.codex) {
+    normalized.agents.enabled.codex = true;
+  }
+
+  if (!normalized.delivery.publicDump) {
+    normalized.delivery.publicDump = {
+      endpoint: "https://0x0.st",
+      fileField: "file",
+      timeoutSec: 25
+    };
+  }
+
+  if (!normalized.delivery.modeDefault) {
+    normalized.delivery.modeDefault = "public_encrypted";
+  }
+
+  return normalized;
+}
+
+export function enabledFromProviderSelection(selection: ProviderSelection): EnabledAgents {
+  if (selection === "claude") {
+    return { claude: true, codex: false };
+  }
+  if (selection === "codex") {
+    return { claude: false, codex: true };
+  }
+  return { claude: true, codex: true };
+}
+
+export function providerSelectionFromEnabled(enabled: EnabledAgents): ProviderSelection {
+  if (enabled.claude && enabled.codex) {
+    return "both";
+  }
+  if (enabled.claude) {
+    return "claude";
+  }
+  return "codex";
+}
+
+export function getEnabledAgents(cfg: CognalConfig): AgentType[] {
+  const out: AgentType[] = [];
+  if (cfg.agents.enabled.claude) {
+    out.push("claude");
+  }
+  if (cfg.agents.enabled.codex) {
+    out.push("codex");
+  }
+  return out;
+}
+
+export function isAgentEnabled(cfg: CognalConfig, agent: AgentType): boolean {
+  return cfg.agents.enabled[agent];
+}
+
+export function getDefaultAgent(cfg: CognalConfig): AgentType {
+  if (cfg.agents.enabled.codex) {
+    return "codex";
+  }
+  return "claude";
 }

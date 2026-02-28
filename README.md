@@ -18,8 +18,7 @@ Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Signal messages to Clau
 - Ubuntu/Debian with `systemd`
 - Node.js 20+
 - `signal-cli`
-- `claude` CLI
-- `codex` CLI
+- `claude` CLI and/or `codex` CLI (selected in setup)
 - Optional: Resend API key for legacy QR email mode
 - Optional: S3-compatible bucket for legacy presigned-link mode
 
@@ -35,6 +34,15 @@ npm link
 
 ```bash
 cognal setup --run-provider-setup --distro ubuntu
+```
+
+`cognal setup` interactively asks which providers should be enabled: `claude`, `codex`, or `both`.
+You can also force this non-interactively:
+
+```bash
+cognal setup --providers claude
+cognal setup --providers codex
+cognal setup --providers both
 ```
 
 This creates `./.cognal/config.toml`, SQLite state, and attempts to install/start `cognald.service`.
@@ -79,6 +87,7 @@ Main config path: `./.cognal/config.toml`
 Important fields:
 
 - `signal.command`, `signal.dataDir`
+- `agents.enabled` (`claude`, `codex` booleans)
 - `agents.claude.command`, `agents.codex.command`
 - `routing.failoverEnabled`
 - `stt.apiKeyEnv` (default `OPENAI_API_KEY`)
