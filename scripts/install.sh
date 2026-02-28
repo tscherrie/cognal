@@ -85,17 +85,46 @@ install_signal_cli_from_release() {
   fi
 
   echo "Installing signal-cli (latest release)..."
-  VERSION="$(curl -Ls -o /dev/null -w '%{url_effective}' https://github.com/AsamK/signal-cli/releases/latest | sed -e 's|^.*/v||')"
+  RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/AsamK/signal-cli/releases/latest)"
+  VERSION="$(printf '%s\n' "$RELEASE_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)"
   if [ -z "$VERSION" ]; then
     echo "Failed to resolve latest signal-cli version." >&2
     exit 1
   fi
 
+  ASSET_URL="$(printf '%s\n' "$RELEASE_JSON" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*signal-cli-[^"]*-Linux-native\.tar\.gz\)".*/\1/p' | head -n1)"
+  if [ -z "$ASSET_URL" ]; then
+    ASSET_URL="$(printf '%s\n' "$RELEASE_JSON" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*signal-cli-[^"]*\.tar\.gz\)".*/\1/p' | grep -v '\.asc$' | head -n1)"
+  fi
+  if [ -z "$ASSET_URL" ]; then
+    echo "Failed to locate a downloadable signal-cli tar.gz asset for version $VERSION." >&2
+    exit 1
+  fi
+
   TMP_DIR="$(mktemp -d)"
   ARCHIVE_PATH="$TMP_DIR/signal-cli-$VERSION.tar.gz"
-  curl -L --fail --show-error "https://github.com/AsamK/signal-cli/releases/download/v$VERSION/signal-cli-$VERSION.tar.gz" -o "$ARCHIVE_PATH"
-  run_privileged tar xf "$ARCHIVE_PATH" -C /opt
-  run_privileged ln -sfn "/opt/signal-cli-$VERSION/bin/signal-cli" /usr/local/bin/signal-cli
+  EXTRACT_DIR="$TMP_DIR/extract"
+  mkdir -p "$EXTRACT_DIR"
+  curl -L --fail --show-error "$ASSET_URL" -o "$ARCHIVE_PATH"
+  tar xf "$ARCHIVE_PATH" -C "$EXTRACT_DIR"
+
+  SRC_DIR=""
+  if [ -d "$EXTRACT_DIR/signal-cli" ]; then
+    SRC_DIR="$EXTRACT_DIR/signal-cli"
+  else
+    SRC_DIR="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  fi
+
+  if [ -z "$SRC_DIR" ] || [ ! -x "$SRC_DIR/bin/signal-cli" ]; then
+    echo "signal-cli archive did not contain expected bin/signal-cli layout." >&2
+    rm -rf "$TMP_DIR"
+    exit 1
+  fi
+
+  INSTALL_PATH="/opt/signal-cli-$VERSION"
+  run_privileged rm -rf "$INSTALL_PATH"
+  run_privileged mv "$SRC_DIR" "$INSTALL_PATH"
+  run_privileged ln -sfn "$INSTALL_PATH/bin/signal-cli" /usr/local/bin/signal-cli
   rm -rf "$TMP_DIR"
 }
 

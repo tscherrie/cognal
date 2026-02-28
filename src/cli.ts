@@ -132,9 +132,10 @@ function signalCliInstallHint(): string {
   return [
     "signal-cli is not installed or not in PATH.",
     "Install it using the official signal-cli binary release:",
-    "  VERSION=$(curl -Ls -o /dev/null -w %{url_effective} https://github.com/AsamK/signal-cli/releases/latest | sed -e 's/^.*\\/v//')",
-    "  curl -L -O https://github.com/AsamK/signal-cli/releases/download/v\"${VERSION}\"/signal-cli-\"${VERSION}\".tar.gz",
-    "  sudo tar xf signal-cli-\"${VERSION}\".tar.gz -C /opt",
+    "  VERSION=$(curl -fsSL https://api.github.com/repos/AsamK/signal-cli/releases/latest | sed -n 's/.*\"tag_name\"[[:space:]]*:[[:space:]]*\"v\\{0,1\\}\\([^\"]*\\)\".*/\\1/p' | head -n1)",
+    "  curl -L -O https://github.com/AsamK/signal-cli/releases/download/v\"${VERSION}\"/signal-cli-\"${VERSION}\"-Linux-native.tar.gz",
+    "  sudo tar xf signal-cli-\"${VERSION}\"-Linux-native.tar.gz -C /opt",
+    "  sudo mv /opt/signal-cli /opt/signal-cli-\"${VERSION}\"",
     "  sudo ln -sf /opt/signal-cli-\"${VERSION}\"/bin/signal-cli /usr/local/bin/",
     "Then verify with: signal-cli --version"
   ].join("\n");
