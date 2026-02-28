@@ -4,13 +4,15 @@ import { createHash } from "node:crypto";
 import TOML from "@iarna/toml";
 import type { AgentType } from "./types.js";
 
-const DEFAULT_PUBLIC_DUMP_ENDPOINT = "https://catbox.moe/user/api.php";
+const DEFAULT_PUBLIC_DUMP_ENDPOINT = "https://litterbox.catbox.moe/resources/internals/api.php";
 const DEFAULT_PUBLIC_DUMP_FILE_FIELD = "fileToUpload";
 const DEFAULT_PUBLIC_DUMP_EXTRA_FIELDS: Record<string, string> = {
-  reqtype: "fileupload"
+  reqtype: "fileupload",
+  time: "24h"
 };
 const LEGACY_PUBLIC_DUMP_ENDPOINT = "https://0x0.st";
 const SECONDARY_LEGACY_PUBLIC_DUMP_ENDPOINT = "https://uguu.se/upload.php";
+const TERTIARY_LEGACY_PUBLIC_DUMP_ENDPOINT = "https://catbox.moe/user/api.php";
 
 export type ProviderSelection = "claude" | "codex" | "both";
 export interface EnabledAgents {
@@ -239,7 +241,10 @@ export function normalizeConfig(cfg: CognalConfig, projectRoot = cfg.projectId):
   } else {
     const endpoint = normalized.delivery.publicDump.endpoint?.trim();
     const fileField = normalized.delivery.publicDump.fileField?.trim();
-    const isLegacyEndpoint = endpoint === LEGACY_PUBLIC_DUMP_ENDPOINT || endpoint === SECONDARY_LEGACY_PUBLIC_DUMP_ENDPOINT;
+    const isLegacyEndpoint =
+      endpoint === LEGACY_PUBLIC_DUMP_ENDPOINT ||
+      endpoint === SECONDARY_LEGACY_PUBLIC_DUMP_ENDPOINT ||
+      endpoint === TERTIARY_LEGACY_PUBLIC_DUMP_ENDPOINT;
     if (!endpoint || isLegacyEndpoint) {
       normalized.delivery.publicDump.endpoint = DEFAULT_PUBLIC_DUMP_ENDPOINT;
     }

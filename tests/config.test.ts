@@ -20,33 +20,44 @@ describe("config multi-project defaults", () => {
     expect(cfg.signal.dataDir).toBe("/srv/project-a/.cognal/signal-cli");
   });
 
-  it("defaults public dump config to catbox", () => {
+  it("defaults public dump config to litterbox", () => {
     const cfg = defaultConfig("/srv/project-a");
     expect(cfg.delivery.modeDefault).toBe("public_encrypted");
-    expect(cfg.delivery.publicDump.endpoint).toBe("https://catbox.moe/user/api.php");
+    expect(cfg.delivery.publicDump.endpoint).toBe("https://litterbox.catbox.moe/resources/internals/api.php");
     expect(cfg.delivery.publicDump.fileField).toBe("fileToUpload");
-    expect(cfg.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload" });
+    expect(cfg.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload", time: "24h" });
   });
 
-  it("migrates legacy 0x0 dump config to catbox defaults", () => {
+  it("migrates legacy 0x0 dump config to litterbox defaults", () => {
     const cfg = defaultConfig("/srv/project-a");
     cfg.delivery.publicDump.endpoint = "https://0x0.st";
     cfg.delivery.publicDump.fileField = "file";
     const normalized = normalizeConfig(cfg, "/srv/project-a");
-    expect(normalized.delivery.publicDump.endpoint).toBe("https://catbox.moe/user/api.php");
+    expect(normalized.delivery.publicDump.endpoint).toBe("https://litterbox.catbox.moe/resources/internals/api.php");
     expect(normalized.delivery.publicDump.fileField).toBe("fileToUpload");
-    expect(normalized.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload" });
+    expect(normalized.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload", time: "24h" });
     expect(normalized.delivery.modeDefault).toBe("public_encrypted");
   });
 
-  it("migrates legacy uguu dump config to catbox defaults", () => {
+  it("migrates legacy uguu dump config to litterbox defaults", () => {
     const cfg = defaultConfig("/srv/project-a");
     cfg.delivery.publicDump.endpoint = "https://uguu.se/upload.php";
     cfg.delivery.publicDump.fileField = "files[]";
     const normalized = normalizeConfig(cfg, "/srv/project-a");
-    expect(normalized.delivery.publicDump.endpoint).toBe("https://catbox.moe/user/api.php");
+    expect(normalized.delivery.publicDump.endpoint).toBe("https://litterbox.catbox.moe/resources/internals/api.php");
     expect(normalized.delivery.publicDump.fileField).toBe("fileToUpload");
-    expect(normalized.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload" });
+    expect(normalized.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload", time: "24h" });
+    expect(normalized.delivery.modeDefault).toBe("public_encrypted");
+  });
+
+  it("migrates legacy catbox dump config to litterbox defaults", () => {
+    const cfg = defaultConfig("/srv/project-a");
+    cfg.delivery.publicDump.endpoint = "https://catbox.moe/user/api.php";
+    cfg.delivery.publicDump.fileField = "fileToUpload";
+    const normalized = normalizeConfig(cfg, "/srv/project-a");
+    expect(normalized.delivery.publicDump.endpoint).toBe("https://litterbox.catbox.moe/resources/internals/api.php");
+    expect(normalized.delivery.publicDump.fileField).toBe("fileToUpload");
+    expect(normalized.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload", time: "24h" });
     expect(normalized.delivery.modeDefault).toBe("public_encrypted");
   });
 });

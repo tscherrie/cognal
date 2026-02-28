@@ -119,6 +119,7 @@ describe("DeliveryAdapter public_encrypted", () => {
     const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
       const form = init?.body as FormData;
       expect(form.get("reqtype")).toBe("fileupload");
+      expect(form.get("time")).toBe("24h");
       expect(form.get("fileToUpload")).toBeTruthy();
       return new Response("https://files.catbox.moe/abc123.html\n", { status: 200 });
     });
@@ -126,11 +127,12 @@ describe("DeliveryAdapter public_encrypted", () => {
 
     const adapter = new DeliveryAdapter({
       publicDump: {
-        endpoint: "https://catbox.moe/user/api.php",
+        endpoint: "https://litterbox.catbox.moe/resources/internals/api.php",
         fileField: "fileToUpload",
         timeoutSec: 5,
         extraFields: {
-          reqtype: "fileupload"
+          reqtype: "fileupload",
+          time: "24h"
         }
       }
     });
