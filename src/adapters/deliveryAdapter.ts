@@ -162,6 +162,23 @@ export class DeliveryAdapter {
   }
 
   private async uploadPublicFile(filePath: string, mimeType: string): Promise<string> {
+    const attempts = 3;
+    let lastError: unknown;
+    for (let i = 1; i <= attempts; i += 1) {
+      try {
+        return await this.uploadPublicFileOnce(filePath, mimeType);
+      } catch (err) {
+        lastError = err;
+        if (i >= attempts || !this.isRetriableUploadError(err)) {
+          throw err;
+        }
+        await this.sleep(300 * i);
+      }
+    }
+    throw lastError;
+  }
+
+  private async uploadPublicFileOnce(filePath: string, mimeType: string): Promise<string> {
     if (!this.cfg.publicDump) {
       throw new Error("public dump is not configured");
     }
@@ -204,6 +221,23 @@ export class DeliveryAdapter {
     }
 
     return url;
+  }
+
+  private isRetriableUploadError(err: unknown): boolean {
+    const message = String(err);
+    if (/operation was aborted/i.test(message) || /fetch failed/i.test(message) || /request failed/i.test(message)) {
+      return true;
+    }
+    const statusMatch = message.match(/public upload failed \((\d{3})\)/i);
+    if (!statusMatch) {
+      return false;
+    }
+    const status = Number(statusMatch[1]);
+    return status === 429 || status >= 500;
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
   }
 
   private describeError(err: unknown): string {

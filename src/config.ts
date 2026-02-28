@@ -172,7 +172,7 @@ export function defaultConfig(projectRoot: string): CognalConfig {
       publicDump: {
         endpoint: DEFAULT_PUBLIC_DUMP_ENDPOINT,
         fileField: DEFAULT_PUBLIC_DUMP_FILE_FIELD,
-        timeoutSec: 25,
+        timeoutSec: 45,
         extraFields: { ...DEFAULT_PUBLIC_DUMP_EXTRA_FIELDS }
       }
     },
@@ -235,7 +235,7 @@ export function normalizeConfig(cfg: CognalConfig, projectRoot = cfg.projectId):
     normalized.delivery.publicDump = {
       endpoint: DEFAULT_PUBLIC_DUMP_ENDPOINT,
       fileField: DEFAULT_PUBLIC_DUMP_FILE_FIELD,
-      timeoutSec: 25,
+      timeoutSec: 45,
       extraFields: { ...DEFAULT_PUBLIC_DUMP_EXTRA_FIELDS }
     };
   } else {
@@ -252,7 +252,7 @@ export function normalizeConfig(cfg: CognalConfig, projectRoot = cfg.projectId):
       normalized.delivery.publicDump.fileField = DEFAULT_PUBLIC_DUMP_FILE_FIELD;
     }
     if (!normalized.delivery.publicDump.timeoutSec || normalized.delivery.publicDump.timeoutSec <= 0) {
-      normalized.delivery.publicDump.timeoutSec = 25;
+      normalized.delivery.publicDump.timeoutSec = 45;
     }
     if (
       !normalized.delivery.publicDump.extraFields ||

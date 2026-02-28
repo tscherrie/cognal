@@ -25,6 +25,7 @@ import { SignalCliAdapter } from "./adapters/signalCliAdapter.js";
 import { DeliveryAdapter } from "./adapters/deliveryAdapter.js";
 
 const logger = new Logger("cli");
+const MAX_LINK_ATTEMPTS = 3;
 
 function parseProviderSelection(value: string): ProviderSelection {
   const normalized = value.trim().toLowerCase();
@@ -388,6 +389,56 @@ async function createQrPng(uri: string, linksDir: string, baseName: string): Pro
   return filePath;
 }
 
+function isRetriableLinkError(err: unknown): boolean {
+  const message = String(err);
+  return /Connection closed!/i.test(message) || /exit 3/i.test(message) || /Timed out/i.test(message);
+}
+
+async function runLinkDeliveryFlow(
+  params: {
+    db: Db;
+    userId: string;
+    phone: string;
+    paths: ReturnType<typeof getRuntimePaths>;
+    signal: SignalCliAdapter;
+    delivery: DeliveryAdapter;
+  }
+): Promise<void> {
+  for (let attempt = 1; attempt <= MAX_LINK_ATTEMPTS; attempt += 1) {
+    const linkSession = await params.signal.createDeviceLinkSession(`cognal-${params.phone}`);
+    const pngPath = await createQrPng(linkSession.uri, params.paths.linksDir, `${params.phone}-${Date.now()}-a${attempt}`);
+    const result = await deliverQr(pngPath, params.delivery);
+
+    await params.db.recordDelivery(params.userId, result.mode, result.target, null, result.expiresAt ?? null);
+
+    process.stdout.write(`QR delivery mode: ${result.mode}\n`);
+    process.stdout.write(`Target: ${result.target}\n`);
+    if (result.expiresAt) {
+      process.stdout.write(`Expires at: ${result.expiresAt}\n`);
+    }
+    if (result.secret) {
+      process.stdout.write(`Password: ${result.secret}\n`);
+      process.stdout.write("Share link and password separately.\n");
+    }
+    process.stdout.write(`Link attempt ${attempt}/${MAX_LINK_ATTEMPTS}. QR is valid only briefly (~60s).\n`);
+    process.stdout.write("Waiting for Signal device-link confirmation. Keep this command running until completion.\n");
+
+    try {
+      await linkSession.completion;
+      process.stdout.write("Signal device-link completed.\n");
+      return;
+    } catch (err) {
+      if (attempt < MAX_LINK_ATTEMPTS && isRetriableLinkError(err)) {
+        process.stdout.write("Signal link window closed before completion. Generating a fresh QR...\n");
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw new Error("Signal device-link failed after maximum retry attempts.");
+}
+
 const program = new Command();
 
 program
@@ -505,45 +556,36 @@ program
 async function userAddAction(phone: string, projectRoot: string): Promise<void> {
   validatePhone(phone);
   const { db, paths, cfg } = await getConfigAndDb(projectRoot);
-  if (!(await commandExists(cfg.signal.command))) {
-    await db.close();
-    throw new Error(signalCliInstallHint());
-  }
-  const recordEmail = makeRecordEmail(phone);
-
-  let user = await db.getUserByPhone(phone);
-  if (!user) {
-    user = await db.addUser(phone, recordEmail, getDefaultAgent(cfg));
-  } else {
-    const binding = await db.getBinding(user.id, getDefaultAgent(cfg));
-    if (!isAgentEnabled(cfg, binding.activeAgent)) {
-      await db.setActiveAgent(user.id, getDefaultAgent(cfg));
+  try {
+    if (!(await commandExists(cfg.signal.command))) {
+      throw new Error(signalCliInstallHint());
     }
+    const recordEmail = makeRecordEmail(phone);
+
+    let user = await db.getUserByPhone(phone);
+    if (!user) {
+      user = await db.addUser(phone, recordEmail, getDefaultAgent(cfg));
+    } else {
+      const binding = await db.getBinding(user.id, getDefaultAgent(cfg));
+      if (!isAgentEnabled(cfg, binding.activeAgent)) {
+        await db.setActiveAgent(user.id, getDefaultAgent(cfg));
+      }
+    }
+
+    process.stdout.write(`User registered in pending state: ${phone}\n`);
+    const signal = new SignalCliAdapter(cfg.signal.command, cfg.signal.dataDir, cfg.signal.account);
+    const deliveryAdapter = createDeliveryAdapterFromEnv(cfg);
+    await runLinkDeliveryFlow({
+      db,
+      userId: user.id,
+      phone,
+      paths,
+      signal,
+      delivery: deliveryAdapter
+    });
+  } finally {
+    await db.close();
   }
-
-  const signal = new SignalCliAdapter(cfg.signal.command, cfg.signal.dataDir, cfg.signal.account);
-  const linkSession = await signal.createDeviceLinkSession(`cognal-${phone}`);
-  const pngPath = await createQrPng(linkSession.uri, paths.linksDir, `${phone}-${Date.now()}`);
-
-  const deliveryAdapter = createDeliveryAdapterFromEnv(cfg);
-  const result = await deliverQr(pngPath, deliveryAdapter);
-
-  await db.recordDelivery(user.id, result.mode, result.target, null, result.expiresAt ?? null);
-  await db.close();
-
-  process.stdout.write(`User registered in pending state: ${phone}\n`);
-  process.stdout.write(`QR delivery mode: ${result.mode}\n`);
-  process.stdout.write(`Target: ${result.target}\n`);
-  if (result.expiresAt) {
-    process.stdout.write(`Expires at: ${result.expiresAt}\n`);
-  }
-  if (result.secret) {
-    process.stdout.write(`Password: ${result.secret}\n`);
-    process.stdout.write("Share link and password separately.\n");
-  }
-  process.stdout.write("Waiting for Signal device-link confirmation. Keep this command running until completion.\n");
-  await linkSession.completion;
-  process.stdout.write("Signal device-link completed.\n");
 }
 
 async function userListAction(projectRoot: string): Promise<void> {
@@ -575,37 +617,35 @@ async function userRevokeAction(phone: string, projectRoot: string): Promise<voi
 async function userRelinkAction(phone: string, projectRoot: string): Promise<void> {
   validatePhone(phone);
   const { db, paths, cfg } = await getConfigAndDb(projectRoot);
-  if (!(await commandExists(cfg.signal.command))) {
+  try {
+    if (!(await commandExists(cfg.signal.command))) {
+      throw new Error(signalCliInstallHint());
+    }
+    const user = await db.getUserByPhone(phone);
+    if (!user) {
+      throw new Error(`Unknown user: ${phone}`);
+    }
+    const binding = await db.getBinding(user.id, getDefaultAgent(cfg));
+    if (!isAgentEnabled(cfg, binding.activeAgent)) {
+      await db.setActiveAgent(user.id, getDefaultAgent(cfg));
+    }
+
+    await db.setUserStatus(user.id, "pending");
+    process.stdout.write(`Relink generated for ${phone}\n`);
+
+    const signal = new SignalCliAdapter(cfg.signal.command, cfg.signal.dataDir, cfg.signal.account);
+    const delivery = createDeliveryAdapterFromEnv(cfg);
+    await runLinkDeliveryFlow({
+      db,
+      userId: user.id,
+      phone,
+      paths,
+      signal,
+      delivery
+    });
+  } finally {
     await db.close();
-    throw new Error(signalCliInstallHint());
   }
-  const user = await db.getUserByPhone(phone);
-  if (!user) {
-    throw new Error(`Unknown user: ${phone}`);
-  }
-  const binding = await db.getBinding(user.id, getDefaultAgent(cfg));
-  if (!isAgentEnabled(cfg, binding.activeAgent)) {
-    await db.setActiveAgent(user.id, getDefaultAgent(cfg));
-  }
-
-  await db.setUserStatus(user.id, "pending");
-  const signal = new SignalCliAdapter(cfg.signal.command, cfg.signal.dataDir, cfg.signal.account);
-  const linkSession = await signal.createDeviceLinkSession(`cognal-${phone}`);
-  const pngPath = await createQrPng(linkSession.uri, paths.linksDir, `${phone}-${Date.now()}`);
-  const delivery = createDeliveryAdapterFromEnv(cfg);
-  const result = await deliverQr(pngPath, delivery);
-
-  await db.recordDelivery(user.id, result.mode, result.target, null, result.expiresAt ?? null);
-  await db.close();
-  process.stdout.write(`Relink generated for ${phone}\n`);
-  process.stdout.write(`Delivery: ${result.mode} -> ${result.target}\n`);
-  if (result.secret) {
-    process.stdout.write(`Password: ${result.secret}\n`);
-    process.stdout.write("Share link and password separately.\n");
-  }
-  process.stdout.write("Waiting for Signal device-link confirmation. Keep this command running until completion.\n");
-  await linkSession.completion;
-  process.stdout.write("Signal device-link completed.\n");
 }
 
 const userCommand = program.command("user").description("User management");

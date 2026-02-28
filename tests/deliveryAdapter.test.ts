@@ -146,6 +146,34 @@ describe("DeliveryAdapter public_encrypted", () => {
     await cleanupTempFile(pngPath);
   });
 
+  it("retries transient aborted upload errors", async () => {
+    const pngPath = await createTempPng();
+    const fetchSpy = vi.fn()
+      .mockRejectedValueOnce(new Error("This operation was aborted"))
+      .mockResolvedValueOnce(new Response("https://litter.catbox.moe/retryok.html\n", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const adapter = new DeliveryAdapter({
+      publicDump: {
+        endpoint: "https://litterbox.catbox.moe/resources/internals/api.php",
+        fileField: "fileToUpload",
+        timeoutSec: 5,
+        extraFields: {
+          reqtype: "fileupload",
+          time: "24h"
+        }
+      }
+    });
+
+    const result = await adapter.deliverQrByPublicEncrypted(pngPath);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.mode).toBe("public_encrypted");
+    expect(result.target).toBe("https://litter.catbox.moe/retryok.html");
+
+    await cleanupTempFile(pngPath);
+  });
+
   it("fails clearly when upload fails and fallback is disabled", async () => {
     const pngPath = await createTempPng();
     vi.stubGlobal("fetch", vi.fn(async () => new Response("down", { status: 503 })));

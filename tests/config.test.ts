@@ -25,6 +25,7 @@ describe("config multi-project defaults", () => {
     expect(cfg.delivery.modeDefault).toBe("public_encrypted");
     expect(cfg.delivery.publicDump.endpoint).toBe("https://litterbox.catbox.moe/resources/internals/api.php");
     expect(cfg.delivery.publicDump.fileField).toBe("fileToUpload");
+    expect(cfg.delivery.publicDump.timeoutSec).toBe(45);
     expect(cfg.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload", time: "24h" });
   });
 

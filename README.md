@@ -77,6 +77,7 @@ This creates `./.cognal/config.toml`, SQLite state, and installs/starts a projec
 
 During setup, Cognal can also interactively add initial allowed Signal users (phone only).
 When generating a link QR, keep the command running until Signal confirms device-link completion.
+If the Signal provisioning window closes, Cognal automatically generates a fresh QR up to 3 attempts.
 
 Each project gets its own systemd unit name, e.g. `cognald-myproj-a1b2c3d4`.
 Use `-p` to target another project root:
@@ -157,6 +158,7 @@ Important fields:
 - `delivery.modeDefault` (`public_encrypted`)
 - `delivery.publicDump.endpoint` (default `https://litterbox.catbox.moe/resources/internals/api.php`)
 - `delivery.publicDump.fileField` (default `fileToUpload`)
+- `delivery.publicDump.timeoutSec` (default `45`)
 - `delivery.publicDump.extraFields.reqtype` (default `fileupload`)
 - `delivery.publicDump.extraFields.time` (default `24h`)
 - `retention.attachmentsHours`
