@@ -54,9 +54,10 @@ export interface SendContext {
 }
 
 export interface DeliveryResult {
-  mode: "email" | "link" | "local";
+  mode: "email" | "link" | "local" | "public_encrypted";
   target: string;
   expiresAt?: string;
+  secret?: string;
 }
 
 export interface TranscriptionResult {

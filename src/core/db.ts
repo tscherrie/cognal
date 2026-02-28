@@ -320,7 +320,13 @@ export class Db {
     );
   }
 
-  async recordDelivery(userId: string, mode: "email" | "link" | "local", target: string, token: string | null, expiresAt: string | null): Promise<void> {
+  async recordDelivery(
+    userId: string,
+    mode: "email" | "link" | "local" | "public_encrypted",
+    target: string,
+    token: string | null,
+    expiresAt: string | null
+  ): Promise<void> {
     await this.run(
       `INSERT INTO deliveries (id, user_id, mode, target, token, expires_at, delivered_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,

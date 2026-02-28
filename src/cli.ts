@@ -14,6 +14,7 @@ import { SignalCliAdapter } from "./adapters/signalCliAdapter.js";
 import { DeliveryAdapter } from "./adapters/deliveryAdapter.js";
 
 const logger = new Logger("cli");
+type DeliveryMode = "email" | "link" | "public_encrypted";
 
 function resolveProjectRoot(input?: string): string {
   return input ? path.resolve(input) : process.cwd();
@@ -133,6 +134,7 @@ async function doctorChecks(projectRoot: string): Promise<HealthCheckResult[]> {
 function createDeliveryAdapterFromEnv(cfg: Awaited<ReturnType<typeof loadOrCreateConfig>>): DeliveryAdapter {
   const resendApiKey = process.env[cfg.delivery.resend.apiKeyEnv];
   const storage = cfg.delivery.storage;
+  const publicDump = cfg.delivery.publicDump;
   return new DeliveryAdapter({
     resendApiKey,
     resendFrom: cfg.delivery.resend.from,
@@ -143,8 +145,48 @@ function createDeliveryAdapterFromEnv(cfg: Awaited<ReturnType<typeof loadOrCreat
       accessKey: storage.accessKeyEnv ? process.env[storage.accessKeyEnv] : undefined,
       secretKey: storage.secretKeyEnv ? process.env[storage.secretKeyEnv] : undefined,
       ttlSec: storage.presignedTtlSec
+    },
+    publicDump: {
+      endpoint: process.env.COGNAL_PUBLIC_DUMP_ENDPOINT || publicDump.endpoint,
+      fileField: publicDump.fileField,
+      timeoutSec: publicDump.timeoutSec
     }
   });
+}
+
+function resolveDeliveryMode(
+  requested: string | undefined,
+  cfg: Awaited<ReturnType<typeof loadOrCreateConfig>>
+): DeliveryMode {
+  const selected = String(requested ?? cfg.delivery.modeDefault).trim().toLowerCase();
+  if (selected === "email") {
+    return "email";
+  }
+  if (selected === "link") {
+    return "link";
+  }
+  if (selected === "public_encrypted" || selected === "public-encrypted" || selected === "public") {
+    return "public_encrypted";
+  }
+  throw new Error(`Unknown delivery mode '${selected}'. Use: email, link, public_encrypted`);
+}
+
+async function deliverQr(
+  mode: DeliveryMode,
+  email: string,
+  pngPath: string,
+  deliveryAdapter: DeliveryAdapter
+) {
+  if (mode === "email") {
+    return await deliveryAdapter.deliverQrByEmail(email, pngPath).catch(async (err) => {
+      logger.warn("email delivery failed; fallback to public_encrypted", { error: String(err) });
+      return await deliveryAdapter.deliverQrByPublicEncrypted(pngPath);
+    });
+  }
+  if (mode === "link") {
+    return await deliveryAdapter.deliverQrByLink(pngPath);
+  }
+  return await deliveryAdapter.deliverQrByPublicEncrypted(pngPath);
 }
 
 async function createQrPng(uri: string, linksDir: string, baseName: string): Promise<string> {
@@ -257,15 +299,9 @@ async function userAddAction(phone: string, email: string, deliver: string | und
   const uri = await signal.createDeviceLinkUri(`cognal-${phone}`);
   const pngPath = await createQrPng(uri, paths.linksDir, `${phone}-${Date.now()}`);
 
-  const mode: "email" | "link" = deliver === "link" ? "link" : cfg.delivery.modeDefault;
+  const mode = resolveDeliveryMode(deliver, cfg);
   const deliveryAdapter = createDeliveryAdapterFromEnv(cfg);
-
-  const result = mode === "email"
-    ? await deliveryAdapter.deliverQrByEmail(email, pngPath).catch(async (err) => {
-      logger.warn("email delivery failed; fallback to link/local", { error: String(err) });
-      return await deliveryAdapter.deliverQrByLink(pngPath);
-    })
-    : await deliveryAdapter.deliverQrByLink(pngPath);
+  const result = await deliverQr(mode, email, pngPath, deliveryAdapter);
 
   await db.recordDelivery(user.id, result.mode, result.target, null, result.expiresAt ?? null);
   await db.close();
@@ -275,6 +311,10 @@ async function userAddAction(phone: string, email: string, deliver: string | und
   process.stdout.write(`Target: ${result.target}\n`);
   if (result.expiresAt) {
     process.stdout.write(`Expires at: ${result.expiresAt}\n`);
+  }
+  if (result.secret) {
+    process.stdout.write(`Password: ${result.secret}\n`);
+    process.stdout.write("Share link and password separately.\n");
   }
 }
 
@@ -318,15 +358,17 @@ async function userRelinkAction(phone: string, deliver: string | undefined, proj
   const uri = await signal.createDeviceLinkUri(`cognal-${phone}`);
   const pngPath = await createQrPng(uri, paths.linksDir, `${phone}-${Date.now()}`);
   const delivery = createDeliveryAdapterFromEnv(cfg);
-  const mode: "email" | "link" = deliver === "link" ? "link" : cfg.delivery.modeDefault;
-  const result = mode === "email"
-    ? await delivery.deliverQrByEmail(user.email, pngPath).catch(() => delivery.deliverQrByLink(pngPath))
-    : await delivery.deliverQrByLink(pngPath);
+  const mode = resolveDeliveryMode(deliver, cfg);
+  const result = await deliverQr(mode, user.email, pngPath, delivery);
 
   await db.recordDelivery(user.id, result.mode, result.target, null, result.expiresAt ?? null);
   await db.close();
   process.stdout.write(`Relink generated for ${phone}\n`);
   process.stdout.write(`Delivery: ${result.mode} -> ${result.target}\n`);
+  if (result.secret) {
+    process.stdout.write(`Password: ${result.secret}\n`);
+    process.stdout.write("Share link and password separately.\n");
+  }
 }
 
 const userCommand = program.command("user").description("User management");
@@ -334,7 +376,7 @@ userCommand
   .command("add")
   .requiredOption("--phone <phone>", "Phone in E.164 format")
   .requiredOption("--email <email>", "User email")
-  .option("--deliver <email|link>", "Delivery mode")
+  .option("--deliver <email|link|public_encrypted>", "Delivery mode")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
     await userAddAction(opts.phone, opts.email, opts.deliver, projectRoot);
@@ -358,7 +400,7 @@ userCommand
 userCommand
   .command("relink")
   .requiredOption("--phone <phone>", "Phone in E.164 format")
-  .option("--deliver <email|link>", "Delivery mode")
+  .option("--deliver <email|link|public_encrypted>", "Delivery mode")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
     await userRelinkAction(opts.phone, opts.deliver, projectRoot);
@@ -368,7 +410,7 @@ program
   .command("user:add")
   .requiredOption("--phone <phone>", "Phone in E.164 format")
   .requiredOption("--email <email>", "User email")
-  .option("--deliver <email|link>", "Delivery mode")
+  .option("--deliver <email|link|public_encrypted>", "Delivery mode")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
     await userAddAction(opts.phone, opts.email, opts.deliver, projectRoot);
@@ -392,7 +434,7 @@ program
 program
   .command("user:relink")
   .requiredOption("--phone <phone>", "Phone in E.164 format")
-  .option("--deliver <email|link>", "Delivery mode")
+  .option("--deliver <email|link|public_encrypted>", "Delivery mode")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
     await userRelinkAction(opts.phone, opts.deliver, projectRoot);

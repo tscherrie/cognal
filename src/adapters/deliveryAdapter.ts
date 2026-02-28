@@ -1,10 +1,11 @@
-import { readFileSync } from "node:fs";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Resend } from "resend";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { DeliveryResult } from "../types.js";
+import { createEncryptedViewerBundle, generatePassword } from "./publicEncryptedBundle.js";
 
 export interface DeliveryConfig {
   resendApiKey?: string;
@@ -16,6 +17,11 @@ export interface DeliveryConfig {
     accessKey?: string;
     secretKey?: string;
     ttlSec: number;
+  };
+  publicDump?: {
+    endpoint: string;
+    fileField: string;
+    timeoutSec: number;
   };
 }
 
@@ -44,7 +50,7 @@ export class DeliveryAdapter {
     if (!this.resend) {
       throw new Error("Resend is not configured");
     }
-    const buffer = readFileSync(pngPath);
+    const buffer = await fs.readFile(pngPath);
     const fileName = path.basename(pngPath);
     await this.resend.emails.send({
       from: this.cfg.resendFrom ?? "Cognal <noreply@example.com>",
@@ -74,7 +80,7 @@ export class DeliveryAdapter {
     }
 
     const key = `qr/${randomUUID()}-${path.basename(pngPath)}`;
-    const body = readFileSync(pngPath);
+    const body = await fs.readFile(pngPath);
 
     await this.storageClient.send(
       new PutObjectCommand({
@@ -101,5 +107,80 @@ export class DeliveryAdapter {
       target: signed,
       expiresAt
     };
+  }
+
+  async deliverQrByPublicEncrypted(pngPath: string): Promise<DeliveryResult> {
+    const password = generatePassword(20);
+    const pngBytes = await fs.readFile(pngPath);
+    const { html } = createEncryptedViewerBundle(pngBytes, password);
+
+    const securePath = path.join(
+      path.dirname(pngPath),
+      `${path.basename(pngPath, path.extname(pngPath))}.secure.html`
+    );
+    await fs.writeFile(securePath, html, "utf8");
+
+    if (!this.cfg.publicDump?.endpoint) {
+      return {
+        mode: "local",
+        target: securePath,
+        secret: password
+      };
+    }
+
+    try {
+      const url = await this.uploadPublicFile(securePath, "text/html");
+      return {
+        mode: "public_encrypted",
+        target: url,
+        secret: password
+      };
+    } catch {
+      return {
+        mode: "local",
+        target: securePath,
+        secret: password
+      };
+    }
+  }
+
+  private async uploadPublicFile(filePath: string, mimeType: string): Promise<string> {
+    if (!this.cfg.publicDump) {
+      throw new Error("public dump is not configured");
+    }
+    const bytes = await fs.readFile(filePath);
+    const body = new FormData();
+    body.append(
+      this.cfg.publicDump.fileField,
+      new Blob([bytes], { type: mimeType }),
+      path.basename(filePath)
+    );
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.cfg.publicDump.timeoutSec * 1000);
+
+    const response = await fetch(this.cfg.publicDump.endpoint, {
+      method: "POST",
+      body,
+      signal: controller.signal
+    }).finally(() => {
+      clearTimeout(timeout);
+    });
+
+    if (!response.ok) {
+      throw new Error(`public upload failed (${response.status})`);
+    }
+
+    const text = (await response.text()).trim();
+    const url = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => /^https?:\/\//i.test(line));
+
+    if (!url) {
+      throw new Error(`public upload did not return URL: ${text}`);
+    }
+
+    return url;
   }
 }

@@ -11,6 +11,7 @@ Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Signal messages to Clau
 - Single-active-agent policy per user (RAM saving).
 - Audio transcription via OpenAI `whisper-1` (auto language).
 - Attachments are temporary and cleaned up by TTL.
+- Default QR delivery is `public_encrypted` (public upload + separate password).
 
 ## Requirements
 
@@ -19,8 +20,8 @@ Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Signal messages to Clau
 - `signal-cli`
 - `claude` CLI
 - `codex` CLI
-- Optional: Resend API key for QR via email
-- Optional: S3-compatible bucket for presigned QR links
+- Optional: Resend API key for legacy QR email mode
+- Optional: S3-compatible bucket for legacy presigned-link mode
 
 ## Install
 
@@ -50,11 +51,20 @@ cognal logs --follow
 cognal doctor
 cognal update
 
-cognal user add --phone +15551234567 --email user@example.com --deliver email
+cognal user add --phone +15551234567 --email user@example.com --deliver public_encrypted
 cognal user list
 cognal user revoke --phone +15551234567
-cognal user relink --phone +15551234567 --deliver link
+cognal user relink --phone +15551234567 --deliver public_encrypted
 ```
+
+## Public encrypted QR mode
+
+`public_encrypted` creates an encrypted HTML bundle that contains the QR image ciphertext. The file is uploaded to a public dump host (default `https://0x0.st`), and Cognal prints:
+
+- public URL
+- one-time password
+
+Share URL and password separately.
 
 ## Daemon run (manual)
 
@@ -72,7 +82,8 @@ Important fields:
 - `agents.claude.command`, `agents.codex.command`
 - `routing.failoverEnabled`
 - `stt.apiKeyEnv` (default `OPENAI_API_KEY`)
-- `delivery.modeDefault` (`email` or `link`)
+- `delivery.modeDefault` (`public_encrypted`, `email`, or `link`)
+- `delivery.publicDump.endpoint` (default `https://0x0.st`)
 - `retention.attachmentsHours`
 
 ## Testing

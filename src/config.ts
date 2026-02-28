@@ -34,7 +34,7 @@ export interface CognalConfig {
     apiKeyEnv: string;
   };
   delivery: {
-    modeDefault: "email" | "link";
+    modeDefault: "email" | "link" | "public_encrypted";
     resend: {
       apiKeyEnv: string;
       from: string;
@@ -47,6 +47,11 @@ export interface CognalConfig {
       secretKeyEnv?: string;
       publicBaseUrl?: string;
       presignedTtlSec: number;
+    };
+    publicDump: {
+      endpoint: string;
+      fileField: string;
+      timeoutSec: number;
     };
   };
   retention: {
@@ -117,13 +122,18 @@ export function defaultConfig(projectRoot: string): CognalConfig {
       apiKeyEnv: "OPENAI_API_KEY"
     },
     delivery: {
-      modeDefault: "email",
+      modeDefault: "public_encrypted",
       resend: {
         apiKeyEnv: "RESEND_API_KEY",
         from: "Cognal <noreply@example.com>"
       },
       storage: {
         presignedTtlSec: 900
+      },
+      publicDump: {
+        endpoint: "https://0x0.st",
+        fileField: "file",
+        timeoutSec: 25
       }
     },
     retention: {
