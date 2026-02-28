@@ -114,6 +114,36 @@ describe("DeliveryAdapter public_encrypted", () => {
     await cleanupTempFile(pngPath);
   });
 
+  it("sends configured extra form fields", async () => {
+    const pngPath = await createTempPng();
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      const form = init?.body as FormData;
+      expect(form.get("reqtype")).toBe("fileupload");
+      expect(form.get("fileToUpload")).toBeTruthy();
+      return new Response("https://files.catbox.moe/abc123.html\n", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const adapter = new DeliveryAdapter({
+      publicDump: {
+        endpoint: "https://catbox.moe/user/api.php",
+        fileField: "fileToUpload",
+        timeoutSec: 5,
+        extraFields: {
+          reqtype: "fileupload"
+        }
+      }
+    });
+
+    const result = await adapter.deliverQrByPublicEncrypted(pngPath);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(result.mode).toBe("public_encrypted");
+    expect(result.target).toBe("https://files.catbox.moe/abc123.html");
+
+    await cleanupTempFile(pngPath);
+  });
+
   it("fails clearly when upload fails and fallback is disabled", async () => {
     const pngPath = await createTempPng();
     vi.stubGlobal("fetch", vi.fn(async () => new Response("down", { status: 503 })));

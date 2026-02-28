@@ -120,7 +120,7 @@ cognal uninstall --yes --remove-workspace --remove-global
 
 ## Public encrypted QR mode
 
-`public_encrypted` creates an encrypted HTML bundle that contains the QR image ciphertext. The file is uploaded to a public dump host (default `https://uguu.se/upload.php`), and Cognal prints:
+`public_encrypted` creates an encrypted HTML bundle that contains the QR image ciphertext. The file is uploaded to a public dump host (default `https://catbox.moe/user/api.php`), and Cognal prints:
 
 - public URL
 - one-time password
@@ -146,7 +146,9 @@ Important fields:
 - `routing.failoverEnabled`
 - `stt.apiKeyEnv` (default `OPENAI_API_KEY`)
 - `delivery.modeDefault` (`public_encrypted`)
-- `delivery.publicDump.endpoint` (default `https://uguu.se/upload.php`)
+- `delivery.publicDump.endpoint` (default `https://catbox.moe/user/api.php`)
+- `delivery.publicDump.fileField` (default `fileToUpload`)
+- `delivery.publicDump.extraFields.reqtype` (default `fileupload`)
 - `retention.attachmentsHours`
 
 ## Testing

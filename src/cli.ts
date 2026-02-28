@@ -350,7 +350,8 @@ function createDeliveryAdapterFromEnv(cfg: Awaited<ReturnType<typeof loadOrCreat
     publicDump: {
       endpoint: process.env.COGNAL_PUBLIC_DUMP_ENDPOINT || publicDump.endpoint,
       fileField: publicDump.fileField,
-      timeoutSec: publicDump.timeoutSec
+      timeoutSec: publicDump.timeoutSec,
+      extraFields: publicDump.extraFields
     }
   });
 }

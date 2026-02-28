@@ -4,9 +4,13 @@ import { createHash } from "node:crypto";
 import TOML from "@iarna/toml";
 import type { AgentType } from "./types.js";
 
-const DEFAULT_PUBLIC_DUMP_ENDPOINT = "https://uguu.se/upload.php";
-const DEFAULT_PUBLIC_DUMP_FILE_FIELD = "files[]";
+const DEFAULT_PUBLIC_DUMP_ENDPOINT = "https://catbox.moe/user/api.php";
+const DEFAULT_PUBLIC_DUMP_FILE_FIELD = "fileToUpload";
+const DEFAULT_PUBLIC_DUMP_EXTRA_FIELDS: Record<string, string> = {
+  reqtype: "fileupload"
+};
 const LEGACY_PUBLIC_DUMP_ENDPOINT = "https://0x0.st";
+const SECONDARY_LEGACY_PUBLIC_DUMP_ENDPOINT = "https://uguu.se/upload.php";
 
 export type ProviderSelection = "claude" | "codex" | "both";
 export interface EnabledAgents {
@@ -66,6 +70,7 @@ export interface CognalConfig {
       endpoint: string;
       fileField: string;
       timeoutSec: number;
+      extraFields?: Record<string, string>;
     };
   };
   retention: {
@@ -165,7 +170,8 @@ export function defaultConfig(projectRoot: string): CognalConfig {
       publicDump: {
         endpoint: DEFAULT_PUBLIC_DUMP_ENDPOINT,
         fileField: DEFAULT_PUBLIC_DUMP_FILE_FIELD,
-        timeoutSec: 25
+        timeoutSec: 25,
+        extraFields: { ...DEFAULT_PUBLIC_DUMP_EXTRA_FIELDS }
       }
     },
     retention: {
@@ -227,19 +233,28 @@ export function normalizeConfig(cfg: CognalConfig, projectRoot = cfg.projectId):
     normalized.delivery.publicDump = {
       endpoint: DEFAULT_PUBLIC_DUMP_ENDPOINT,
       fileField: DEFAULT_PUBLIC_DUMP_FILE_FIELD,
-      timeoutSec: 25
+      timeoutSec: 25,
+      extraFields: { ...DEFAULT_PUBLIC_DUMP_EXTRA_FIELDS }
     };
   } else {
     const endpoint = normalized.delivery.publicDump.endpoint?.trim();
     const fileField = normalized.delivery.publicDump.fileField?.trim();
-    if (!endpoint || endpoint === LEGACY_PUBLIC_DUMP_ENDPOINT) {
+    const isLegacyEndpoint = endpoint === LEGACY_PUBLIC_DUMP_ENDPOINT || endpoint === SECONDARY_LEGACY_PUBLIC_DUMP_ENDPOINT;
+    if (!endpoint || isLegacyEndpoint) {
       normalized.delivery.publicDump.endpoint = DEFAULT_PUBLIC_DUMP_ENDPOINT;
     }
-    if (!fileField || endpoint === LEGACY_PUBLIC_DUMP_ENDPOINT) {
+    if (!fileField || isLegacyEndpoint) {
       normalized.delivery.publicDump.fileField = DEFAULT_PUBLIC_DUMP_FILE_FIELD;
     }
     if (!normalized.delivery.publicDump.timeoutSec || normalized.delivery.publicDump.timeoutSec <= 0) {
       normalized.delivery.publicDump.timeoutSec = 25;
+    }
+    if (
+      !normalized.delivery.publicDump.extraFields ||
+      Object.keys(normalized.delivery.publicDump.extraFields).length === 0 ||
+      isLegacyEndpoint
+    ) {
+      normalized.delivery.publicDump.extraFields = { ...DEFAULT_PUBLIC_DUMP_EXTRA_FIELDS };
     }
   }
 

@@ -22,6 +22,7 @@ export interface DeliveryConfig {
     endpoint: string;
     fileField: string;
     timeoutSec: number;
+    extraFields?: Record<string, string>;
   };
 }
 
@@ -166,6 +167,9 @@ export class DeliveryAdapter {
     }
     const bytes = await fs.readFile(filePath);
     const body = new FormData();
+    for (const [key, value] of Object.entries(this.cfg.publicDump.extraFields ?? {})) {
+      body.append(key, value);
+    }
     body.append(
       this.cfg.publicDump.fileField,
       new Blob([bytes], { type: mimeType }),
