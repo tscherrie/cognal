@@ -25,6 +25,10 @@ export interface DeliveryConfig {
   };
 }
 
+export interface PublicEncryptedDeliveryOptions {
+  allowLocalFallback?: boolean;
+}
+
 export class DeliveryAdapter {
   private readonly resend?: Resend;
   private readonly storageClient?: S3Client;
@@ -109,7 +113,11 @@ export class DeliveryAdapter {
     };
   }
 
-  async deliverQrByPublicEncrypted(pngPath: string): Promise<DeliveryResult> {
+  async deliverQrByPublicEncrypted(
+    pngPath: string,
+    options: PublicEncryptedDeliveryOptions = {}
+  ): Promise<DeliveryResult> {
+    const allowLocalFallback = options.allowLocalFallback ?? false;
     const password = generatePassword(20);
     const pngBytes = await fs.readFile(pngPath);
     const { html } = createEncryptedViewerBundle(pngBytes, password);
@@ -121,6 +129,11 @@ export class DeliveryAdapter {
     await fs.writeFile(securePath, html, "utf8");
 
     if (!this.cfg.publicDump?.endpoint) {
+      if (!allowLocalFallback) {
+        throw new Error(
+          "public_encrypted delivery requires a public upload endpoint (set delivery.publicDump.endpoint or COGNAL_PUBLIC_DUMP_ENDPOINT)"
+        );
+      }
       return {
         mode: "local",
         target: securePath,
@@ -135,7 +148,10 @@ export class DeliveryAdapter {
         target: url,
         secret: password
       };
-    } catch {
+    } catch (err) {
+      if (!allowLocalFallback) {
+        throw new Error(`public_encrypted upload failed: ${String(err)}`);
+      }
       return {
         mode: "local",
         target: securePath,

@@ -434,13 +434,13 @@ async function deliverQr(
   if (mode === "email") {
     return await deliveryAdapter.deliverQrByEmail(email, pngPath).catch(async (err) => {
       logger.warn("email delivery failed; fallback to public_encrypted", { error: String(err) });
-      return await deliveryAdapter.deliverQrByPublicEncrypted(pngPath);
+      return await deliveryAdapter.deliverQrByPublicEncrypted(pngPath, { allowLocalFallback: false });
     });
   }
   if (mode === "link") {
     return await deliveryAdapter.deliverQrByLink(pngPath);
   }
-  return await deliveryAdapter.deliverQrByPublicEncrypted(pngPath);
+  return await deliveryAdapter.deliverQrByPublicEncrypted(pngPath, { allowLocalFallback: false });
 }
 
 async function createQrPng(uri: string, linksDir: string, baseName: string): Promise<string> {
