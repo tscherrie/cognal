@@ -27,6 +27,24 @@ import { DeliveryAdapter } from "./adapters/deliveryAdapter.js";
 const logger = new Logger("cli");
 type DeliveryMode = "email" | "link" | "public_encrypted";
 
+function parseDeliveryModeInput(value: string): DeliveryMode | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "email") {
+    return "email";
+  }
+  if (normalized === "link") {
+    return "link";
+  }
+  if (normalized === "public_encrypted" || normalized === "public-encrypted" || normalized === "public") {
+    return "public_encrypted";
+  }
+  return null;
+}
+
+function isLikelyEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
 function parseProviderSelection(value: string): ProviderSelection {
   const normalized = value.trim().toLowerCase();
   if (normalized === "claude" || normalized === "codex" || normalized === "both") {
@@ -234,18 +252,64 @@ async function runSetupOnboarding(projectRoot: string): Promise<void> {
     return;
   }
 
+  process.stdout.write("Example phone format: +4915123456789\n");
+  process.stdout.write("Delivery modes: public_encrypted (recommended), email, link\n");
+
   while (true) {
-    const phone = await promptText("Signal phone (E.164, empty to finish)");
+    const phone = await promptText("Signal phone in E.164 (example: +4915123456789, empty to finish)");
     if (!phone.trim()) {
       break;
     }
-    const email = await promptText("Email for QR delivery");
-    const deliveryInput = await promptText("Delivery mode (public_encrypted|email|link)", "public_encrypted");
+    const normalizedPhone = phone.trim();
+    try {
+      validatePhone(normalizedPhone);
+    } catch {
+      process.stdout.write(`Invalid phone format: ${normalizedPhone}\n`);
+      continue;
+    }
+
+    const deliveryRaw = await promptText(
+      "Delivery mode [public_encrypted|email|link] (public_encrypted = public link + separate password)",
+      "public_encrypted"
+    );
+    const deliveryMode = parseDeliveryModeInput(deliveryRaw);
+    if (!deliveryMode) {
+      process.stdout.write(`Invalid delivery mode: ${deliveryRaw}\n`);
+      continue;
+    }
+
+    let email = "";
+    if (deliveryMode === "email") {
+      while (true) {
+        const candidate = await promptText("Email for QR delivery (example: user@example.com)");
+        if (!candidate.trim()) {
+          process.stdout.write("Email is required for delivery mode 'email'.\n");
+          continue;
+        }
+        if (!isLikelyEmail(candidate.trim())) {
+          process.stdout.write("Please enter a valid email format (example: user@example.com).\n");
+          continue;
+        }
+        email = candidate.trim();
+        break;
+      }
+    } else {
+      const candidate = (await promptText(
+        "Email for record (optional, example: user@example.com). Leave empty to skip",
+        ""
+      )).trim();
+      if (candidate && !isLikelyEmail(candidate)) {
+        process.stdout.write("Invalid email format, using internal placeholder.\n");
+      }
+      email = candidate && isLikelyEmail(candidate)
+        ? candidate
+        : `no-email+${normalizedPhone.replace(/\D/g, "")}@local.invalid`;
+    }
 
     try {
-      await userAddAction(phone.trim(), email.trim(), deliveryInput.trim(), projectRoot);
+      await userAddAction(normalizedPhone, email, deliveryMode, projectRoot);
     } catch (err) {
-      process.stdout.write(`Failed to add user ${phone.trim()}: ${String(err)}\n`);
+      process.stdout.write(`Failed to add user ${normalizedPhone}: ${String(err)}\n`);
     }
 
     const addAnother = await promptYesNo("Add another user?", true);
