@@ -151,6 +151,10 @@ function signalCliInstallHint(): string {
   ].join("\n");
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 async function openDb(projectRoot: string): Promise<{ db: Db; paths: ReturnType<typeof getRuntimePaths> }> {
   const paths = getRuntimePaths(projectRoot);
   await ensureRuntimeDirs(paths);
@@ -330,17 +334,11 @@ async function installProviderCli(spec: ProviderRuntimeSpec): Promise<void> {
 }
 
 async function runProviderSetupWithArgs(command: string, args: string[]): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const proc = spawn(command, args, { stdio: "inherit" });
-    proc.on("exit", (code) => {
-      if ((code ?? 0) !== 0) {
-        reject(new Error(`${command} ${args.join(" ")} exited with code ${code}`));
-        return;
-      }
-      resolve();
-    });
-    proc.on("error", reject);
-  });
+  const fullCommand = [command, ...args].map(shellQuote).join(" ");
+  const code = await runInteractiveCommand("bash", ["-lc", fullCommand]);
+  if (code !== 0) {
+    throw new Error(`${command} ${args.join(" ")} exited with code ${code}`);
+  }
 }
 
 async function doctorChecks(projectRoot: string, cfg: CognalConfig): Promise<HealthCheckResult[]> {
