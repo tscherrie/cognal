@@ -95,6 +95,26 @@ async function promptYesNo(question: string, defaultYes: boolean): Promise<boole
   }
 }
 
+async function promptText(question: string, defaultValue = ""): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return defaultValue;
+  }
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  try {
+    const suffix = defaultValue ? ` [${defaultValue}]` : "";
+    const answer = (await rl.question(`${question}${suffix}: `)).trim();
+    if (!answer) {
+      return defaultValue;
+    }
+    return answer;
+  } finally {
+    rl.close();
+  }
+}
+
 function resolveProjectRoot(input?: string): string {
   return input ? path.resolve(input) : process.cwd();
 }
@@ -194,7 +214,7 @@ async function uninstallSystemdUnit(cfg: CognalConfig): Promise<void> {
   }
 
   const cmd = [
-    `sudo systemctl disable --now ${serviceName} || true`,
+    `sudo systemctl disable --now ${serviceName} >/dev/null 2>&1 || true`,
     `sudo rm -f /etc/systemd/system/${serviceName}.service`,
     "sudo systemctl daemon-reload",
     "sudo systemctl reset-failed"
@@ -206,6 +226,33 @@ async function uninstallSystemdUnit(cfg: CognalConfig): Promise<void> {
     return;
   }
   process.stdout.write(`Removed service ${serviceName}\n`);
+}
+
+async function runSetupOnboarding(projectRoot: string): Promise<void> {
+  const addNow = await promptYesNo("Add allowed Signal users now?", false);
+  if (!addNow) {
+    return;
+  }
+
+  while (true) {
+    const phone = await promptText("Signal phone (E.164, empty to finish)");
+    if (!phone.trim()) {
+      break;
+    }
+    const email = await promptText("Email for QR delivery");
+    const deliveryInput = await promptText("Delivery mode (public_encrypted|email|link)", "public_encrypted");
+
+    try {
+      await userAddAction(phone.trim(), email.trim(), deliveryInput.trim(), projectRoot);
+    } catch (err) {
+      process.stdout.write(`Failed to add user ${phone.trim()}: ${String(err)}\n`);
+    }
+
+    const addAnother = await promptYesNo("Add another user?", true);
+    if (!addAnother) {
+      break;
+    }
+  }
 }
 
 async function runProviderSetup(command: string): Promise<void> {
@@ -356,6 +403,7 @@ program
   .option("--run-provider-setup", "Run native Claude/Codex setup flows", false)
   .option("--distro <ubuntu|debian>", "Set distro in config")
   .option("--providers <claude|codex|both>", "Enabled providers")
+  .option("--skip-onboarding", "Skip interactive user onboarding", false)
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
     const { db, paths, cfg } = await getConfigAndDb(projectRoot);
@@ -390,6 +438,9 @@ program
 
     await installSystemdUnit(projectRoot, cfg);
     await db.close();
+    if (!opts.skipOnboarding) {
+      await runSetupOnboarding(projectRoot);
+    }
     process.stdout.write("Setup complete. Run 'cognal doctor' for final verification.\n");
   });
 

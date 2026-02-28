@@ -37,10 +37,18 @@ One-liner install (clone + build + link + setup):
 curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh
 ```
 
+By default this installs Cognal source into `~/.local/share/cognal` and runs `setup` for your **current directory** as project root.
+
 You can pass options via `sh -s -- ...`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh -s -- --dir /srv/myproj --providers codex --distro ubuntu
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh -s -- --project-dir /srv/myproj --providers codex --distro ubuntu
+```
+
+Skip onboarding prompts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh -s -- --skip-onboarding
 ```
 
 ## Setup
@@ -59,6 +67,8 @@ cognal setup --providers both
 ```
 
 This creates `./.cognal/config.toml`, SQLite state, and installs/starts a project-scoped systemd service.
+
+During setup, Cognal can also interactively add initial allowed Signal users (phone + email + delivery mode).
 
 Each project gets its own systemd unit name, e.g. `cognald-myproj-a1b2c3d4`.
 Use `-p` to target another project root:
