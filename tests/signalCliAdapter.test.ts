@@ -49,6 +49,17 @@ describe("SignalCliAdapter createDeviceLinkUri", () => {
     );
   });
 
+  it("accepts URI even if signal-cli times out after printing it", async () => {
+    runCommandMock.mockResolvedValue({
+      code: -1,
+      stdout: "sgnl://linkdevice?uuid=abc&pub_key=def\n",
+      stderr: "Timed out"
+    });
+    const adapter = new SignalCliAdapter("signal-cli", "/tmp/signal", undefined);
+    const uri = await adapter.createDeviceLinkUri("cognal");
+    expect(uri).toBe("sgnl://linkdevice?uuid=abc&pub_key=def");
+  });
+
   it("throws when no valid URI is present", async () => {
     runCommandMock.mockResolvedValue({
       code: 0,

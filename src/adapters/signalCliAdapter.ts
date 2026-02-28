@@ -113,10 +113,6 @@ export class SignalCliAdapter {
     const result = await runCommand(this.command, args, { timeoutMs: 25_000 });
     const output = `${result.stdout}\n${result.stderr}`;
 
-    if (result.code !== 0) {
-      throw new Error(`signal-cli link failed (exit ${result.code}): ${output.trim()}`);
-    }
-
     const directMatch = output.match(/sgnl:\/\/linkdevice\?[^\s"'`<>]+/);
     if (directMatch) {
       const uri = directMatch[0];
@@ -134,6 +130,10 @@ export class SignalCliAdapter {
         throw new Error(`signal-cli returned incomplete legacy link URI: ${legacyMatch[0]}`);
       }
       return uri;
+    }
+
+    if (result.code !== 0) {
+      throw new Error(`signal-cli link failed (exit ${result.code}): ${output.trim()}`);
     }
 
     throw new Error(`signal-cli link output did not contain a valid device-link URI: ${output.trim()}`);
