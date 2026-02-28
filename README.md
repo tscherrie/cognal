@@ -66,8 +66,9 @@ cognal setup --distro ubuntu
 
 `cognal setup` interactively asks which providers should be enabled: `claude`, `codex`, or `both`.
 If an enabled provider CLI is missing, setup installs it automatically (`npm i -g ...`).
-Setup then runs the native provider login/setup flows automatically.
+Setup performs Signal onboarding first, then runs native provider login/setup flows at the end.
 In non-interactive shells, provider setup is skipped unless `--run-provider-setup` is passed.
+If `ANTHROPIC_API_KEY` (Claude) or `OPENAI_API_KEY` (Codex) is already set, native provider login is skipped.
 You can also force this non-interactively:
 
 ```bash

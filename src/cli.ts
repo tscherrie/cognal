@@ -37,6 +37,7 @@ interface ProviderRuntimeSpec {
   command: string;
   installPackage: string;
   setupArgs: string[];
+  apiKeyEnv: string;
 }
 
 function parseProviderSelection(value: string): ProviderSelection {
@@ -307,7 +308,8 @@ function enabledProviderSpecs(cfg: CognalConfig): ProviderRuntimeSpec[] {
       label: "Claude",
       command: cfg.agents.claude.command,
       installPackage: "@anthropic-ai/claude-code@latest",
-      setupArgs: ["auth", "login"]
+      setupArgs: ["auth", "login"],
+      apiKeyEnv: "ANTHROPIC_API_KEY"
     });
   }
   if (cfg.agents.enabled.codex) {
@@ -315,7 +317,8 @@ function enabledProviderSpecs(cfg: CognalConfig): ProviderRuntimeSpec[] {
       label: "Codex",
       command: cfg.agents.codex.command,
       installPackage: "@openai/codex@latest",
-      setupArgs: ["login"]
+      setupArgs: ["login"],
+      apiKeyEnv: "OPENAI_API_KEY"
     });
   }
   return specs;
@@ -547,6 +550,12 @@ program
       }
     }
 
+    await installSystemdUnit(projectRoot, cfg);
+    await db.close();
+    if (!opts.skipOnboarding) {
+      await runSetupOnboarding(projectRoot);
+    }
+
     if (shouldRunProviderSetup) {
       for (const spec of providerSpecs) {
         const exists = await commandExists(spec.command);
@@ -554,16 +563,15 @@ program
           process.stdout.write(`[WARN] Skipping ${spec.label} setup because '${spec.command}' is missing.\n`);
           continue;
         }
+        if (process.env[spec.apiKeyEnv]?.trim()) {
+          process.stdout.write(`[OK] ${spec.apiKeyEnv} detected. Skipping native ${spec.label} login.\n`);
+          continue;
+        }
         process.stdout.write(`Running native ${spec.label} setup...\n`);
         await runProviderSetupWithArgs(spec.command, spec.setupArgs);
       }
     }
 
-    await installSystemdUnit(projectRoot, cfg);
-    await db.close();
-    if (!opts.skipOnboarding) {
-      await runSetupOnboarding(projectRoot);
-    }
     process.stdout.write("Setup complete. Run 'cognal doctor' for final verification.\n");
   });
 
