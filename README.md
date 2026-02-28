@@ -65,7 +65,7 @@ cognal setup --distro ubuntu
 ```
 
 `cognal setup` interactively asks which providers should be enabled: `claude`, `codex`, or `both`.
-If an enabled provider CLI is missing, setup offers to install it automatically (`npm i -g ...`).
+If an enabled provider CLI is missing, setup installs it automatically (`npm i -g ...`).
 Setup also asks whether to run the native provider login/setup flows right away.
 You can also force this non-interactively:
 

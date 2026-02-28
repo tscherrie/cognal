@@ -529,11 +529,7 @@ program
         if (exists) {
           continue;
         }
-        const installNow = await promptYesNo(`${spec.label} CLI is missing. Install it now?`, true);
-        if (!installNow) {
-          process.stdout.write(`[WARN] ${spec.label} CLI still missing. Install manually: npm i -g ${spec.installPackage}\n`);
-          continue;
-        }
+        process.stdout.write(`${spec.label} CLI is missing. Installing automatically...\n`);
         await installProviderCli(spec);
         process.stdout.write(`[OK] ${spec.label} CLI installed.\n`);
       }
