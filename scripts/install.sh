@@ -108,22 +108,28 @@ install_signal_cli_from_release() {
   curl -L --fail --show-error "$ASSET_URL" -o "$ARCHIVE_PATH"
   tar xf "$ARCHIVE_PATH" -C "$EXTRACT_DIR"
 
-  SRC_DIR=""
-  if [ -d "$EXTRACT_DIR/signal-cli" ]; then
-    SRC_DIR="$EXTRACT_DIR/signal-cli"
-  else
-    SRC_DIR="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
-  fi
-
-  if [ -z "$SRC_DIR" ] || [ ! -x "$SRC_DIR/bin/signal-cli" ]; then
-    echo "signal-cli archive did not contain expected bin/signal-cli layout." >&2
+  CANDIDATE_BIN="$(find "$EXTRACT_DIR" -type f -name signal-cli | head -n1)"
+  if [ -z "$CANDIDATE_BIN" ]; then
+    echo "signal-cli archive did not contain a signal-cli executable." >&2
     rm -rf "$TMP_DIR"
     exit 1
   fi
 
   INSTALL_PATH="/opt/signal-cli-$VERSION"
   run_privileged rm -rf "$INSTALL_PATH"
-  run_privileged mv "$SRC_DIR" "$INSTALL_PATH"
+
+  case "$CANDIDATE_BIN" in
+    */bin/signal-cli)
+      SRC_ROOT="$(dirname "$(dirname "$CANDIDATE_BIN")")"
+      run_privileged mkdir -p "$INSTALL_PATH"
+      run_privileged cp -a "$SRC_ROOT"/. "$INSTALL_PATH"/
+      ;;
+    *)
+      run_privileged mkdir -p "$INSTALL_PATH/bin"
+      run_privileged install -m 0755 "$CANDIDATE_BIN" "$INSTALL_PATH/bin/signal-cli"
+      ;;
+  esac
+
   run_privileged ln -sfn "$INSTALL_PATH/bin/signal-cli" /usr/local/bin/signal-cli
   rm -rf "$TMP_DIR"
 }
