@@ -36,12 +36,20 @@ One-liner install (clone + build + link + setup):
 curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh
 ```
 
+On Ubuntu/Debian, the installer also auto-installs missing `java` and `signal-cli` (requires `sudo`).
+
 By default this installs Cognal source into `~/.local/share/cognal` and runs `setup` for your **current directory** as project root.
 
 You can pass options via `sh -s -- ...`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh -s -- --project-dir /srv/myproj --providers codex --distro ubuntu
+```
+
+Skip auto-install of Java/signal-cli prerequisites:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh -s -- --skip-prereqs
 ```
 
 Skip onboarding prompts:
