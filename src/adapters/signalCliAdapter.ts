@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { runCommand } from "../core/utils.js";
 
 export interface SignalInboundEvent {
@@ -108,35 +109,119 @@ export class SignalCliAdapter {
     }
   }
 
-  async createDeviceLinkUri(name: string): Promise<string> {
-    const args = ["--config", this.dataDir, "link", "-n", name];
-    const result = await runCommand(this.command, args, { timeoutMs: 25_000 });
-    const output = `${result.stdout}\n${result.stderr}`;
-
+  private extractDeviceLinkUri(output: string): string | null {
     const directMatch = output.match(/sgnl:\/\/linkdevice\?[^\s"'`<>]+/);
     if (directMatch) {
       const uri = directMatch[0];
-      if (!uri.includes("pub_key=") || !uri.includes("uuid=")) {
-        throw new Error(`signal-cli returned incomplete link URI: ${uri}`);
+      if (uri.includes("pub_key=") && uri.includes("uuid=")) {
+        return uri;
       }
-      return uri;
+      return null;
     }
 
     const legacyMatch = output.match(/tsdevice:\/\?[^\s"'`<>]+/);
     if (legacyMatch) {
       const query = legacyMatch[0].slice("tsdevice:/?".length);
       const uri = `sgnl://linkdevice?${query}`;
-      if (!uri.includes("pub_key=") || !uri.includes("uuid=")) {
-        throw new Error(`signal-cli returned incomplete legacy link URI: ${legacyMatch[0]}`);
+      if (uri.includes("pub_key=") && uri.includes("uuid=")) {
+        return uri;
       }
-      return uri;
+      return null;
     }
 
-    if (result.code !== 0) {
-      throw new Error(`signal-cli link failed (exit ${result.code}): ${output.trim()}`);
-    }
+    return null;
+  }
 
-    throw new Error(`signal-cli link output did not contain a valid device-link URI: ${output.trim()}`);
+  async createDeviceLinkSession(
+    name: string,
+    options: { timeoutMs?: number } = {}
+  ): Promise<{ uri: string; completion: Promise<void> }> {
+    const timeoutMs = options.timeoutMs ?? 10 * 60_000;
+    const args = ["--config", this.dataDir];
+    if (this.account) {
+      args.push("-a", this.account);
+    }
+    args.push("link", "-n", name);
+
+    const proc = spawn(this.command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    let uri: string | null = null;
+    let completed = false;
+    let completionError: Error | null = null;
+
+    const appendOutput = (chunk: unknown): void => {
+      output += String(chunk);
+      if (output.length > 64_000) {
+        output = output.slice(output.length - 64_000);
+      }
+      if (!uri) {
+        uri = this.extractDeviceLinkUri(output);
+      }
+    };
+
+    proc.stdout.on("data", appendOutput);
+    proc.stderr.on("data", appendOutput);
+
+    const completion = new Promise<void>((resolve, reject) => {
+      proc.on("error", (err) => {
+        if (completed) {
+          return;
+        }
+        completed = true;
+        completionError = new Error(`signal-cli link failed: ${String(err)}`);
+        reject(completionError);
+      });
+      proc.on("close", (code) => {
+        if (completed) {
+          return;
+        }
+        completed = true;
+        if ((code ?? 0) === 0) {
+          resolve();
+          return;
+        }
+        completionError = new Error(`signal-cli link failed (exit ${code}): ${output.trim()}`);
+        reject(completionError);
+      });
+    });
+
+    const timeoutHandle = setTimeout(() => {
+      if (!completed) {
+        proc.kill("SIGTERM");
+      }
+    }, timeoutMs);
+    completion.finally(() => {
+      clearTimeout(timeoutHandle);
+    }).catch(() => {
+      // caller handles completion errors
+    });
+
+    return await new Promise<{ uri: string; completion: Promise<void> }>((resolve, reject) => {
+      const poll = setInterval(() => {
+        if (uri) {
+          clearInterval(poll);
+          resolve({ uri, completion });
+          return;
+        }
+        if (completed) {
+          clearInterval(poll);
+          reject(completionError ?? new Error(`signal-cli link output did not contain a valid device-link URI: ${output.trim()}`));
+        }
+      }, 25);
+
+      completion.catch(() => {
+        if (!uri) {
+          clearInterval(poll);
+          reject(completionError ?? new Error(`signal-cli link output did not contain a valid device-link URI: ${output.trim()}`));
+        }
+      });
+    });
+  }
+
+  async createDeviceLinkUri(name: string): Promise<string> {
+    const session = await this.createDeviceLinkSession(name);
+    await session.completion;
+    return session.uri;
   }
 
   async tryResolveLinkedAccount(phoneE164: string): Promise<string | null> {

@@ -76,6 +76,7 @@ cognal setup --providers both
 This creates `./.cognal/config.toml`, SQLite state, and installs/starts a project-scoped systemd service.
 
 During setup, Cognal can also interactively add initial allowed Signal users (phone only).
+When generating a link QR, keep the command running until Signal confirms device-link completion.
 
 Each project gets its own systemd unit name, e.g. `cognald-myproj-a1b2c3d4`.
 Use `-p` to target another project root:

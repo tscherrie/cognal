@@ -522,8 +522,8 @@ async function userAddAction(phone: string, projectRoot: string): Promise<void> 
   }
 
   const signal = new SignalCliAdapter(cfg.signal.command, cfg.signal.dataDir, cfg.signal.account);
-  const uri = await signal.createDeviceLinkUri(`cognal-${phone}`);
-  const pngPath = await createQrPng(uri, paths.linksDir, `${phone}-${Date.now()}`);
+  const linkSession = await signal.createDeviceLinkSession(`cognal-${phone}`);
+  const pngPath = await createQrPng(linkSession.uri, paths.linksDir, `${phone}-${Date.now()}`);
 
   const deliveryAdapter = createDeliveryAdapterFromEnv(cfg);
   const result = await deliverQr(pngPath, deliveryAdapter);
@@ -541,6 +541,9 @@ async function userAddAction(phone: string, projectRoot: string): Promise<void> 
     process.stdout.write(`Password: ${result.secret}\n`);
     process.stdout.write("Share link and password separately.\n");
   }
+  process.stdout.write("Waiting for Signal device-link confirmation. Keep this command running until completion.\n");
+  await linkSession.completion;
+  process.stdout.write("Signal device-link completed.\n");
 }
 
 async function userListAction(projectRoot: string): Promise<void> {
@@ -587,8 +590,8 @@ async function userRelinkAction(phone: string, projectRoot: string): Promise<voi
 
   await db.setUserStatus(user.id, "pending");
   const signal = new SignalCliAdapter(cfg.signal.command, cfg.signal.dataDir, cfg.signal.account);
-  const uri = await signal.createDeviceLinkUri(`cognal-${phone}`);
-  const pngPath = await createQrPng(uri, paths.linksDir, `${phone}-${Date.now()}`);
+  const linkSession = await signal.createDeviceLinkSession(`cognal-${phone}`);
+  const pngPath = await createQrPng(linkSession.uri, paths.linksDir, `${phone}-${Date.now()}`);
   const delivery = createDeliveryAdapterFromEnv(cfg);
   const result = await deliverQr(pngPath, delivery);
 
@@ -600,6 +603,9 @@ async function userRelinkAction(phone: string, projectRoot: string): Promise<voi
     process.stdout.write(`Password: ${result.secret}\n`);
     process.stdout.write("Share link and password separately.\n");
   }
+  process.stdout.write("Waiting for Signal device-link confirmation. Keep this command running until completion.\n");
+  await linkSession.completion;
+  process.stdout.write("Signal device-link completed.\n");
 }
 
 const userCommand = program.command("user").description("User management");

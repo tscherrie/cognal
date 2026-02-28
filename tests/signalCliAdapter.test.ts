@@ -1,6 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const spawnMock = vi.fn();
 const runCommandMock = vi.fn();
+
+vi.mock("node:child_process", () => {
+  return {
+    spawn: (...args: unknown[]) => spawnMock(...args)
+  };
+});
 
 vi.mock("../src/core/utils.js", () => {
   return {
@@ -10,77 +18,90 @@ vi.mock("../src/core/utils.js", () => {
 
 import { SignalCliAdapter } from "../src/adapters/signalCliAdapter.js";
 
-describe("SignalCliAdapter createDeviceLinkUri", () => {
+class MockChild extends EventEmitter {
+  stdout = new EventEmitter();
+  stderr = new EventEmitter();
+
+  kill = vi.fn(() => {
+    this.emit("close", -1);
+    return true;
+  });
+}
+
+describe("SignalCliAdapter createDeviceLinkSession", () => {
   beforeEach(() => {
+    spawnMock.mockReset();
     runCommandMock.mockReset();
   });
 
-  it("returns direct sgnl URI", async () => {
-    runCommandMock.mockResolvedValue({
-      code: 0,
-      stdout: "sgnl://linkdevice?uuid=abc&pub_key=def\n",
-      stderr: ""
-    });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns direct sgnl URI and completion resolves", async () => {
+    const proc = new MockChild();
+    spawnMock.mockReturnValue(proc);
     const adapter = new SignalCliAdapter("signal-cli", "/tmp/signal", undefined);
-    const uri = await adapter.createDeviceLinkUri("cognal");
-    expect(uri).toBe("sgnl://linkdevice?uuid=abc&pub_key=def");
+
+    const sessionPromise = adapter.createDeviceLinkSession("cognal", { timeoutMs: 30_000 });
+    proc.stdout.emit("data", "sgnl://linkdevice?uuid=abc&pub_key=def\n");
+    const session = await sessionPromise;
+    expect(session.uri).toBe("sgnl://linkdevice?uuid=abc&pub_key=def");
+
+    proc.emit("close", 0);
+    await expect(session.completion).resolves.toBeUndefined();
   });
 
   it("converts legacy tsdevice URI to sgnl URI", async () => {
-    runCommandMock.mockResolvedValue({
-      code: 0,
-      stdout: "tsdevice:/?uuid=abc&pub_key=def\n",
-      stderr: ""
-    });
+    const proc = new MockChild();
+    spawnMock.mockReturnValue(proc);
     const adapter = new SignalCliAdapter("signal-cli", "/tmp/signal", undefined);
-    const uri = await adapter.createDeviceLinkUri("cognal");
-    expect(uri).toBe("sgnl://linkdevice?uuid=abc&pub_key=def");
+
+    const sessionPromise = adapter.createDeviceLinkSession("cognal", { timeoutMs: 30_000 });
+    proc.stderr.emit("data", "tsdevice:/?uuid=abc&pub_key=def\n");
+    const session = await sessionPromise;
+    expect(session.uri).toBe("sgnl://linkdevice?uuid=abc&pub_key=def");
+
+    proc.emit("close", 0);
+    await expect(session.completion).resolves.toBeUndefined();
   });
 
-  it("throws when signal-cli exits non-zero", async () => {
-    runCommandMock.mockResolvedValue({
-      code: 127,
-      stdout: "",
-      stderr: "signal-cli: command not found"
-    });
+  it("rejects if command exits before emitting URI", async () => {
+    const proc = new MockChild();
+    spawnMock.mockReturnValue(proc);
     const adapter = new SignalCliAdapter("signal-cli", "/tmp/signal", undefined);
-    await expect(adapter.createDeviceLinkUri("cognal")).rejects.toThrow(
-      "signal-cli link failed"
-    );
+
+    const sessionPromise = adapter.createDeviceLinkSession("cognal", { timeoutMs: 30_000 });
+    proc.stderr.emit("data", "signal-cli: command not found");
+    proc.emit("close", 127);
+
+    await expect(sessionPromise).rejects.toThrow("signal-cli link failed");
   });
 
-  it("accepts URI even if signal-cli times out after printing it", async () => {
-    runCommandMock.mockResolvedValue({
-      code: -1,
-      stdout: "sgnl://linkdevice?uuid=abc&pub_key=def\n",
-      stderr: "Timed out"
-    });
+  it("returns URI but completion rejects if linking later fails", async () => {
+    const proc = new MockChild();
+    spawnMock.mockReturnValue(proc);
     const adapter = new SignalCliAdapter("signal-cli", "/tmp/signal", undefined);
-    const uri = await adapter.createDeviceLinkUri("cognal");
-    expect(uri).toBe("sgnl://linkdevice?uuid=abc&pub_key=def");
+
+    const sessionPromise = adapter.createDeviceLinkSession("cognal", { timeoutMs: 30_000 });
+    proc.stdout.emit("data", "sgnl://linkdevice?uuid=abc&pub_key=def\n");
+    const session = await sessionPromise;
+    proc.stderr.emit("data", "Timed out");
+    proc.emit("close", -1);
+
+    await expect(session.completion).rejects.toThrow("signal-cli link failed");
   });
 
-  it("throws when no valid URI is present", async () => {
-    runCommandMock.mockResolvedValue({
-      code: 0,
-      stdout: "Linking device, please wait...",
-      stderr: ""
-    });
+  it("kills the process when session timeout is reached", async () => {
+    vi.useFakeTimers();
+    const proc = new MockChild();
+    spawnMock.mockReturnValue(proc);
     const adapter = new SignalCliAdapter("signal-cli", "/tmp/signal", undefined);
-    await expect(adapter.createDeviceLinkUri("cognal")).rejects.toThrow(
-      "did not contain a valid device-link URI"
-    );
-  });
 
-  it("throws when URI does not contain pub_key", async () => {
-    runCommandMock.mockResolvedValue({
-      code: 0,
-      stdout: "sgnl://linkdevice?uuid=abc\n",
-      stderr: ""
-    });
-    const adapter = new SignalCliAdapter("signal-cli", "/tmp/signal", undefined);
-    await expect(adapter.createDeviceLinkUri("cognal")).rejects.toThrow(
-      "incomplete link URI"
-    );
+    const sessionPromise = adapter.createDeviceLinkSession("cognal", { timeoutMs: 1000 });
+    vi.advanceTimersByTime(1100);
+
+    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    await expect(sessionPromise).rejects.toThrow("signal-cli link failed");
   });
 });
