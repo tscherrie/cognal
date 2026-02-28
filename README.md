@@ -33,7 +33,7 @@ npm link
 One-liner install (clone + build + link + setup):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/refs/heads/main/scripts/install.sh | sh
 ```
 
 On Ubuntu/Debian, the installer also auto-installs missing `java` and `signal-cli` from the latest GitHub release (requires `sudo`).
@@ -43,19 +43,19 @@ By default this installs Cognal source into `~/.local/share/cognal` and runs `se
 You can pass options via `sh -s -- ...`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh -s -- --project-dir /srv/myproj --providers codex --distro ubuntu
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/refs/heads/main/scripts/install.sh | sh -s -- --project-dir /srv/myproj --providers codex --distro ubuntu
 ```
 
 Skip auto-install of Java/signal-cli prerequisites:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh -s -- --skip-prereqs
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/refs/heads/main/scripts/install.sh | sh -s -- --skip-prereqs
 ```
 
 Skip onboarding prompts:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh -s -- --skip-onboarding
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/refs/heads/main/scripts/install.sh | sh -s -- --skip-onboarding
 ```
 
 ## Setup
