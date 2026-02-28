@@ -5,6 +5,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline/promises";
+import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
 import {
   loadOrCreateConfig,
@@ -26,6 +27,10 @@ import { DeliveryAdapter } from "./adapters/deliveryAdapter.js";
 
 const logger = new Logger("cli");
 const MAX_LINK_ATTEMPTS = 3;
+const CLI_ENTRYPOINT_PATH = fileURLToPath(import.meta.url);
+const DIST_DIR = path.dirname(CLI_ENTRYPOINT_PATH);
+const DAEMON_ENTRYPOINT_PATH = path.join(DIST_DIR, "daemon.js");
+const INSTALL_ROOT = path.dirname(DIST_DIR);
 
 function parseProviderSelection(value: string): ProviderSelection {
   const normalized = value.trim().toLowerCase();
@@ -178,7 +183,7 @@ After=network.target
 Type=simple
 WorkingDirectory=${projectRoot}
 EnvironmentFile=${projectRoot}/.cognal/cognald.env
-ExecStart=${process.execPath} ${projectRoot}/dist/daemon.js
+ExecStart=${process.execPath} ${DAEMON_ENTRYPOINT_PATH}
 User=${runUser}
 Restart=always
 RestartSec=2
@@ -739,7 +744,7 @@ program
     await ensureRuntimeDirs(paths);
     const cfg = await loadOrCreateConfig(paths);
     const steps: Array<{ title: string; command: string }> = [
-      { title: "Update Cognal repository", command: `cd '${projectRoot}' && git fetch --all && git pull --ff-only` }
+      { title: "Update Cognal repository", command: `cd '${INSTALL_ROOT}' && git fetch --all && git pull --ff-only` }
     ];
     if (cfg.agents.enabled.claude) {
       steps.push({ title: "Update Claude", command: "claude update" });
@@ -750,7 +755,7 @@ program
     steps.push(
       { title: "Update signal-cli", command: "sudo apt-get update && sudo apt-get install -y --only-upgrade signal-cli" },
       { title: `Restart ${cfg.runtime.serviceName}`, command: `sudo systemctl restart ${cfg.runtime.serviceName}` },
-      { title: "Run doctor", command: `cd '${projectRoot}' && ${process.execPath} dist/cli.js -p '${projectRoot}' doctor` }
+      { title: "Run doctor", command: `${process.execPath} '${CLI_ENTRYPOINT_PATH}' -p '${projectRoot}' doctor` }
     );
 
     for (const step of steps) {
