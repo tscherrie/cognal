@@ -494,7 +494,7 @@ program
 
 program
   .command("setup")
-  .option("--run-provider-setup", "Run native Claude/Codex setup flows", false)
+  .option("--run-provider-setup", "Force native Claude/Codex setup flows (also without TTY)", false)
   .option("--skip-provider-install", "Skip automatic install for missing provider CLIs", false)
   .option("--skip-provider-setup", "Skip native provider login/setup flows", false)
   .option("--distro <ubuntu|debian>", "Set distro in config")
@@ -540,8 +540,12 @@ program
       if (opts.runProviderSetup) {
         shouldRunProviderSetup = true;
       } else {
-        const defaultRunProviderSetup = process.stdin.isTTY && process.stdout.isTTY;
-        shouldRunProviderSetup = await promptYesNo("Run native provider setup/login now?", defaultRunProviderSetup);
+        shouldRunProviderSetup = process.stdin.isTTY && process.stdout.isTTY;
+        if (!shouldRunProviderSetup) {
+          process.stdout.write(
+            "[WARN] Non-interactive shell detected. Skipping native provider setup/login. Use --run-provider-setup to force.\n"
+          );
+        }
       }
     }
 
