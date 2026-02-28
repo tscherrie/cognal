@@ -128,6 +128,18 @@ function makeRecordEmail(phone: string): string {
   return `no-email+${phone.replace(/\D/g, "")}@local.invalid`;
 }
 
+function signalCliInstallHint(): string {
+  return [
+    "signal-cli is not installed or not in PATH.",
+    "Install it using the official signal-cli binary release:",
+    "  VERSION=$(curl -Ls -o /dev/null -w %{url_effective} https://github.com/AsamK/signal-cli/releases/latest | sed -e 's/^.*\\/v//')",
+    "  curl -L -O https://github.com/AsamK/signal-cli/releases/download/v\"${VERSION}\"/signal-cli-\"${VERSION}\".tar.gz",
+    "  sudo tar xf signal-cli-\"${VERSION}\".tar.gz -C /opt",
+    "  sudo ln -sf /opt/signal-cli-\"${VERSION}\"/bin/signal-cli /usr/local/bin/",
+    "Then verify with: signal-cli --version"
+  ].join("\n");
+}
+
 async function openDb(projectRoot: string): Promise<{ db: Db; paths: ReturnType<typeof getRuntimePaths> }> {
   const paths = getRuntimePaths(projectRoot);
   await ensureRuntimeDirs(paths);
@@ -232,6 +244,13 @@ async function uninstallSystemdUnit(cfg: CognalConfig): Promise<void> {
 }
 
 async function runSetupOnboarding(projectRoot: string): Promise<void> {
+  const { cfg } = await loadProjectConfig(projectRoot);
+  if (!(await commandExists(cfg.signal.command))) {
+    process.stdout.write("[WARN] signal-cli not found. Skipping interactive user onboarding.\n");
+    process.stdout.write(`${signalCliInstallHint()}\n`);
+    return;
+  }
+
   const addNow = await promptYesNo("Add allowed Signal users now?", false);
   if (!addNow) {
     return;
@@ -488,6 +507,10 @@ program
 async function userAddAction(phone: string, projectRoot: string): Promise<void> {
   validatePhone(phone);
   const { db, paths, cfg } = await getConfigAndDb(projectRoot);
+  if (!(await commandExists(cfg.signal.command))) {
+    await db.close();
+    throw new Error(signalCliInstallHint());
+  }
   const recordEmail = makeRecordEmail(phone);
 
   let user = await db.getUserByPhone(phone);
@@ -551,6 +574,10 @@ async function userRevokeAction(phone: string, projectRoot: string): Promise<voi
 async function userRelinkAction(phone: string, projectRoot: string): Promise<void> {
   validatePhone(phone);
   const { db, paths, cfg } = await getConfigAndDb(projectRoot);
+  if (!(await commandExists(cfg.signal.command))) {
+    await db.close();
+    throw new Error(signalCliInstallHint());
+  }
   const user = await db.getUserByPhone(phone);
   if (!user) {
     throw new Error(`Unknown user: ${phone}`);
