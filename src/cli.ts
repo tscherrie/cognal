@@ -69,6 +69,32 @@ async function promptProviderSelection(defaultSelection: ProviderSelection): Pro
   }
 }
 
+async function promptYesNo(question: string, defaultYes: boolean): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return defaultYes;
+  }
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  try {
+    const suffix = defaultYes ? "[Y/n]" : "[y/N]";
+    const answer = (await rl.question(`${question} ${suffix}: `)).trim().toLowerCase();
+    if (!answer) {
+      return defaultYes;
+    }
+    if (["y", "yes"].includes(answer)) {
+      return true;
+    }
+    if (["n", "no"].includes(answer)) {
+      return false;
+    }
+    return defaultYes;
+  } finally {
+    rl.close();
+  }
+}
+
 function resolveProjectRoot(input?: string): string {
   return input ? path.resolve(input) : process.cwd();
 }
@@ -157,6 +183,29 @@ WantedBy=multi-user.target
     return;
   }
   logger.info("systemd unit installed", { service: serviceName });
+}
+
+async function uninstallSystemdUnit(cfg: CognalConfig): Promise<void> {
+  const serviceName = cfg.runtime.serviceName;
+  const hasSystemctl = await commandExists("systemctl");
+  if (!hasSystemctl) {
+    process.stdout.write("systemctl not found. Skipping service cleanup.\n");
+    return;
+  }
+
+  const cmd = [
+    `sudo systemctl disable --now ${serviceName} || true`,
+    `sudo rm -f /etc/systemd/system/${serviceName}.service`,
+    "sudo systemctl daemon-reload",
+    "sudo systemctl reset-failed"
+  ].join(" && ");
+
+  const code = await runInteractiveCommand("bash", ["-lc", cmd]);
+  if (code !== 0) {
+    process.stdout.write(`Warning: service uninstall may be incomplete for ${serviceName}\n`);
+    return;
+  }
+  process.stdout.write(`Removed service ${serviceName}\n`);
 }
 
 async function runProviderSetup(command: string): Promise<void> {
@@ -628,6 +677,48 @@ program
         process.stdout.write("[OK]\n");
       }
     }
+  });
+
+program
+  .command("uninstall")
+  .description("Remove Cognal service and optionally workspace/global installation")
+  .option("--yes", "Skip interactive prompts and use defaults", false)
+  .option("--remove-workspace", "Remove .cognal directory in project root", false)
+  .option("--remove-global", "Run npm unlink -g cognal", false)
+  .action(async (opts, cmd) => {
+    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const { paths, cfg } = await loadProjectConfig(projectRoot);
+
+    const removeService = opts.yes
+      ? true
+      : await promptYesNo(`Remove systemd service '${cfg.runtime.serviceName}'?`, true);
+    const removeWorkspace = opts.removeWorkspace
+      ? true
+      : opts.yes
+        ? false
+        : await promptYesNo(`Remove workspace state '${paths.cognalDir}'?`, false);
+    const removeGlobal = opts.removeGlobal
+      ? true
+      : opts.yes
+        ? false
+        : await promptYesNo("Remove global CLI link (npm unlink -g cognal)?", false);
+
+    if (removeService) {
+      await uninstallSystemdUnit(cfg);
+    }
+    if (removeWorkspace) {
+      await fs.rm(paths.cognalDir, { recursive: true, force: true });
+      process.stdout.write(`Removed ${paths.cognalDir}\n`);
+    }
+    if (removeGlobal) {
+      const code = await runInteractiveCommand("bash", ["-lc", "npm unlink -g cognal || true"]);
+      if (code !== 0) {
+        process.stdout.write("Warning: global unlink may have failed\n");
+      } else {
+        process.stdout.write("Removed global cognal link\n");
+      }
+    }
+    process.stdout.write("Uninstall complete.\n");
   });
 
 program.parseAsync(process.argv).catch((err) => {

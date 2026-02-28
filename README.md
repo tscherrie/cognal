@@ -31,6 +31,18 @@ npm run build
 npm link
 ```
 
+One-liner install (clone + build + link + setup):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh
+```
+
+You can pass options via `sh -s -- ...`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh -s -- --dir /srv/myproj --providers codex --distro ubuntu
+```
+
 ## Setup
 
 ```bash
@@ -69,11 +81,32 @@ cognal status
 cognal logs --follow
 cognal doctor
 cognal update
+cognal uninstall
 
 cognal user add --phone +15551234567 --email user@example.com --deliver public_encrypted
 cognal user list
 cognal user revoke --phone +15551234567
 cognal user relink --phone +15551234567 --deliver public_encrypted
+```
+
+## Uninstall
+
+Interactive uninstall:
+
+```bash
+cognal uninstall
+```
+
+It asks whether to:
+
+- remove the project service (`systemd`)
+- remove project workspace state (`./.cognal`)
+- remove global CLI link (`npm unlink -g cognal`)
+
+Non-interactive:
+
+```bash
+cognal uninstall --yes --remove-workspace --remove-global
 ```
 
 ## Public encrypted QR mode
