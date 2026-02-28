@@ -38,7 +38,10 @@ interface ProviderRuntimeSpec {
   installPackage: string;
   setupArgs: string[];
   apiKeyEnv: string;
+  apiKeyUrl: string;
 }
+
+type ProviderAuthMode = "api_key" | "auth_login";
 
 function parseProviderSelection(value: string): ProviderSelection {
   const normalized = value.trim().toLowerCase();
@@ -156,6 +159,87 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function parseEnvFile(raw: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const idx = trimmed.indexOf("=");
+    if (idx <= 0) {
+      continue;
+    }
+    const key = trimmed.slice(0, idx).trim();
+    let value = trimmed.slice(idx + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+      (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+    ) {
+      value = value.slice(1, -1);
+    }
+    env[key] = value;
+  }
+  return env;
+}
+
+function envValueForFile(value: string): string {
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) {
+    return value;
+  }
+  return shellQuote(value);
+}
+
+async function upsertDaemonEnv(envPath: string, updates: Record<string, string>): Promise<void> {
+  let env: Record<string, string> = {};
+  try {
+    env = parseEnvFile(await fs.readFile(envPath, "utf8"));
+  } catch {
+    env = {};
+  }
+  for (const [key, value] of Object.entries(updates)) {
+    if (!value) {
+      continue;
+    }
+    env[key] = value;
+  }
+  const lines = Object.entries(env)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${envValueForFile(value)}`);
+  await fs.writeFile(envPath, `${lines.join("\n")}\n`, "utf8");
+  try {
+    await fs.chmod(envPath, 0o600);
+  } catch {
+    // best-effort hardening for local secret file permissions
+  }
+}
+
+function parseProviderAuthMode(value: string): ProviderAuthMode {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "1" || normalized === "api" || normalized === "api_key" || normalized === "api-key") {
+    return "api_key";
+  }
+  if (normalized === "2" || normalized === "auth" || normalized === "auth_login" || normalized === "auth-login") {
+    return "auth_login";
+  }
+  throw new Error(`Unknown auth mode '${value}'. Use: api_key or auth_login`);
+}
+
+async function promptProviderAuthMode(spec: ProviderRuntimeSpec): Promise<ProviderAuthMode> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return process.env[spec.apiKeyEnv]?.trim() ? "api_key" : "auth_login";
+  }
+
+  process.stdout.write(`Choose ${spec.label} auth mode:\n`);
+  process.stdout.write(`  1) api_key (recommended for servers)\n`);
+  process.stdout.write(`  2) auth_login (browser OAuth)\n`);
+  const answer = await promptText(`Auth mode for ${spec.label} [api_key]`);
+  if (!answer.trim()) {
+    return "api_key";
+  }
+  return parseProviderAuthMode(answer);
+}
+
 async function openDb(projectRoot: string): Promise<{ db: Db; paths: ReturnType<typeof getRuntimePaths> }> {
   const paths = getRuntimePaths(projectRoot);
   await ensureRuntimeDirs(paths);
@@ -184,7 +268,11 @@ async function getConfigAndDb(projectRoot: string): Promise<{
   return { db, paths, cfg };
 }
 
-async function installSystemdUnit(projectRoot: string, cfg: CognalConfig): Promise<void> {
+async function installSystemdUnit(
+  projectRoot: string,
+  cfg: CognalConfig,
+  extraEnv: Record<string, string> = {}
+): Promise<void> {
   const serviceName = cfg.runtime.serviceName;
   const runUser = process.env.SUDO_USER || process.env.USER || "root";
   const unit = `[Unit]
@@ -208,7 +296,10 @@ WantedBy=multi-user.target
   const localUnitPath = path.join(paths.cognalDir, `${serviceName}.service`);
   const envPath = path.join(paths.cognalDir, "cognald.env");
   await fs.writeFile(localUnitPath, unit, "utf8");
-  await fs.writeFile(envPath, `COGNAL_PROJECT_ROOT=${projectRoot}\n`, "utf8");
+  await upsertDaemonEnv(envPath, {
+    COGNAL_PROJECT_ROOT: projectRoot,
+    ...extraEnv
+  });
 
   const hasSystemctl = await commandExists("systemctl");
   if (!hasSystemctl) {
@@ -309,7 +400,8 @@ function enabledProviderSpecs(cfg: CognalConfig): ProviderRuntimeSpec[] {
       command: cfg.agents.claude.command,
       installPackage: "@anthropic-ai/claude-code@latest",
       setupArgs: ["auth", "login"],
-      apiKeyEnv: "ANTHROPIC_API_KEY"
+      apiKeyEnv: "ANTHROPIC_API_KEY",
+      apiKeyUrl: "https://console.anthropic.com/settings/keys"
     });
   }
   if (cfg.agents.enabled.codex) {
@@ -318,7 +410,8 @@ function enabledProviderSpecs(cfg: CognalConfig): ProviderRuntimeSpec[] {
       command: cfg.agents.codex.command,
       installPackage: "@openai/codex@latest",
       setupArgs: ["login"],
-      apiKeyEnv: "OPENAI_API_KEY"
+      apiKeyEnv: "OPENAI_API_KEY",
+      apiKeyUrl: "https://platform.openai.com/api-keys"
     });
   }
   return specs;
@@ -523,6 +616,8 @@ program
     }
 
     const providerSpecs = enabledProviderSpecs(cfg);
+    const providerAuthModes = new Map<string, ProviderAuthMode>();
+    const daemonEnvUpdates: Record<string, string> = {};
 
     if (!opts.skipProviderInstall) {
       for (const spec of providerSpecs) {
@@ -550,7 +645,6 @@ program
       }
     }
 
-    await installSystemdUnit(projectRoot, cfg);
     await db.close();
     if (!opts.skipOnboarding) {
       await runSetupOnboarding(projectRoot);
@@ -558,12 +652,48 @@ program
 
     if (shouldRunProviderSetup) {
       for (const spec of providerSpecs) {
+        const authMode = await promptProviderAuthMode(spec);
+        providerAuthModes.set(spec.command, authMode);
+
+        if (authMode !== "api_key") {
+          continue;
+        }
+
+        process.stdout.write(`${spec.label} API key URL: ${spec.apiKeyUrl}\n`);
+        const existing = process.env[spec.apiKeyEnv]?.trim() ?? "";
+        const keyPrompt = existing
+          ? `Paste ${spec.apiKeyEnv} (leave empty to keep current value)`
+          : `Paste ${spec.apiKeyEnv}`;
+        const entered = (await promptText(keyPrompt)).trim();
+        const finalKey = entered || existing;
+        if (!finalKey) {
+          process.stdout.write(`[WARN] No ${spec.apiKeyEnv} provided. Falling back to native ${spec.label} auth login.\n`);
+          providerAuthModes.set(spec.command, "auth_login");
+          continue;
+        }
+
+        daemonEnvUpdates[spec.apiKeyEnv] = finalKey;
+        process.env[spec.apiKeyEnv] = finalKey;
+        process.stdout.write(`[OK] ${spec.apiKeyEnv} configured for ${spec.label}.\n`);
+      }
+
+      for (const spec of providerSpecs) {
         const exists = await commandExists(spec.command);
         if (!exists) {
           process.stdout.write(`[WARN] Skipping ${spec.label} setup because '${spec.command}' is missing.\n`);
           continue;
         }
-        if (process.env[spec.apiKeyEnv]?.trim()) {
+
+        const authMode = providerAuthModes.get(spec.command) ?? (process.env[spec.apiKeyEnv]?.trim() ? "api_key" : "auth_login");
+        if (authMode === "api_key") {
+          if (process.env[spec.apiKeyEnv]?.trim()) {
+            process.stdout.write(`[OK] Using ${spec.apiKeyEnv} for ${spec.label}. Skipping auth login.\n`);
+            continue;
+          }
+          process.stdout.write(`[WARN] ${spec.apiKeyEnv} missing. Falling back to native ${spec.label} auth login.\n`);
+        }
+
+        if (process.env[spec.apiKeyEnv]?.trim() && !providerAuthModes.has(spec.command)) {
           process.stdout.write(`[OK] ${spec.apiKeyEnv} detected. Skipping native ${spec.label} login.\n`);
           continue;
         }
@@ -572,6 +702,7 @@ program
       }
     }
 
+    await installSystemdUnit(projectRoot, cfg, daemonEnvUpdates);
     process.stdout.write("Setup complete. Run 'cognal doctor' for final verification.\n");
   });
 

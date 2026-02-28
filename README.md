@@ -67,8 +67,12 @@ cognal setup --distro ubuntu
 `cognal setup` interactively asks which providers should be enabled: `claude`, `codex`, or `both`.
 If an enabled provider CLI is missing, setup installs it automatically (`npm i -g ...`).
 Setup performs Signal onboarding first, then runs native provider login/setup flows at the end.
+Before provider auth, setup asks per provider whether you want `api_key` or `auth_login`.
+If you pick `api_key`, setup asks for the key and shows the provider URL:
+- Claude key: `https://console.anthropic.com/settings/keys`
+- Codex/OpenAI key: `https://platform.openai.com/api-keys`
+Provided keys are written to `./.cognal/cognald.env` for daemon runtime.
 In non-interactive shells, provider setup is skipped unless `--run-provider-setup` is passed.
-If `ANTHROPIC_API_KEY` (Claude) or `OPENAI_API_KEY` (Codex) is already set, native provider login is skipped.
 You can also force this non-interactively:
 
 ```bash
