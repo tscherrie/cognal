@@ -4,7 +4,7 @@ Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Signal messages to Clau
 
 ## Key behavior
 
-- Multi-user whitelist (phone + email).
+- Multi-user whitelist (phone).
 - Multi-project capable on one server (project-scoped service name).
 - Signal onboarding via device-linking QR.
 - `/claude` and `/codex` switch active agent per user.
@@ -20,8 +20,7 @@ Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Signal messages to Clau
 - Node.js 20+
 - `signal-cli`
 - `claude` CLI and/or `codex` CLI (selected in setup)
-- Optional: Resend API key for legacy QR email mode
-- Optional: S3-compatible bucket for legacy presigned-link mode
+- Optional: Override public dump endpoint via `COGNAL_PUBLIC_DUMP_ENDPOINT`
 
 ## Install
 
@@ -68,7 +67,7 @@ cognal setup --providers both
 
 This creates `./.cognal/config.toml`, SQLite state, and installs/starts a project-scoped systemd service.
 
-During setup, Cognal can also interactively add initial allowed Signal users (phone + email + delivery mode).
+During setup, Cognal can also interactively add initial allowed Signal users (phone only).
 
 Each project gets its own systemd unit name, e.g. `cognald-myproj-a1b2c3d4`.
 Use `-p` to target another project root:
@@ -93,10 +92,10 @@ cognal doctor
 cognal update
 cognal uninstall
 
-cognal user add --phone +15551234567 --email user@example.com --deliver public_encrypted
+cognal user add --phone +15551234567
 cognal user list
 cognal user revoke --phone +15551234567
-cognal user relink --phone +15551234567 --deliver public_encrypted
+cognal user relink --phone +15551234567
 ```
 
 ## Uninstall
@@ -121,7 +120,7 @@ cognal uninstall --yes --remove-workspace --remove-global
 
 ## Public encrypted QR mode
 
-`public_encrypted` creates an encrypted HTML bundle that contains the QR image ciphertext. The file is uploaded to a public dump host (default `https://0x0.st`), and Cognal prints:
+`public_encrypted` creates an encrypted HTML bundle that contains the QR image ciphertext. The file is uploaded to a public dump host (default `https://uguu.se/upload.php`), and Cognal prints:
 
 - public URL
 - one-time password
@@ -146,8 +145,8 @@ Important fields:
 - `agents.claude.command`, `agents.codex.command`
 - `routing.failoverEnabled`
 - `stt.apiKeyEnv` (default `OPENAI_API_KEY`)
-- `delivery.modeDefault` (`public_encrypted`, `email`, or `link`)
-- `delivery.publicDump.endpoint` (default `https://0x0.st`)
+- `delivery.modeDefault` (`public_encrypted`)
+- `delivery.publicDump.endpoint` (default `https://uguu.se/upload.php`)
 - `retention.attachmentsHours`
 
 ## Testing

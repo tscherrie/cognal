@@ -81,6 +81,39 @@ describe("DeliveryAdapter public_encrypted", () => {
     await cleanupTempFile(pngPath);
   });
 
+  it("extracts a public URL from JSON responses", async () => {
+    const pngPath = await createTempPng();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              success: true,
+              files: [{ url: "https://o.uguu.se/FRBfJJKc" }]
+            }),
+            { status: 200 }
+          )
+      )
+    );
+
+    const adapter = new DeliveryAdapter({
+      publicDump: {
+        endpoint: "https://uguu.se/upload.php",
+        fileField: "files[]",
+        timeoutSec: 5
+      }
+    });
+
+    const result = await adapter.deliverQrByPublicEncrypted(pngPath);
+
+    expect(result.mode).toBe("public_encrypted");
+    expect(result.target).toBe("https://o.uguu.se/FRBfJJKc");
+    expect(result.secret).toBeTruthy();
+
+    await cleanupTempFile(pngPath);
+  });
+
   it("fails clearly when upload fails and fallback is disabled", async () => {
     const pngPath = await createTempPng();
     vi.stubGlobal("fetch", vi.fn(async () => new Response("down", { status: 503 })));
@@ -95,6 +128,25 @@ describe("DeliveryAdapter public_encrypted", () => {
     await expect(adapter.deliverQrByPublicEncrypted(pngPath)).rejects.toThrow(
       "public_encrypted upload failed"
     );
+
+    await cleanupTempFile(pngPath);
+  });
+
+  it("includes network cause details when fetch throws", async () => {
+    const pngPath = await createTempPng();
+    const fetchErr = Object.assign(new Error("fetch failed"), {
+      cause: { code: "ETIMEDOUT", message: "connect ETIMEDOUT 168.119.145.117:443" }
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => { throw fetchErr; }));
+    const adapter = new DeliveryAdapter({
+      publicDump: {
+        endpoint: "https://0x0.st",
+        fileField: "file",
+        timeoutSec: 5
+      }
+    });
+
+    await expect(adapter.deliverQrByPublicEncrypted(pngPath)).rejects.toThrow(/ETIMEDOUT/);
 
     await cleanupTempFile(pngPath);
   });

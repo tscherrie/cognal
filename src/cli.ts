@@ -25,25 +25,6 @@ import { SignalCliAdapter } from "./adapters/signalCliAdapter.js";
 import { DeliveryAdapter } from "./adapters/deliveryAdapter.js";
 
 const logger = new Logger("cli");
-type DeliveryMode = "email" | "link" | "public_encrypted";
-
-function parseDeliveryModeInput(value: string): DeliveryMode | null {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "email") {
-    return "email";
-  }
-  if (normalized === "link") {
-    return "link";
-  }
-  if (normalized === "public_encrypted" || normalized === "public-encrypted" || normalized === "public") {
-    return "public_encrypted";
-  }
-  return null;
-}
-
-function isLikelyEmail(value: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
 
 function parseProviderSelection(value: string): ProviderSelection {
   const normalized = value.trim().toLowerCase();
@@ -141,6 +122,10 @@ function validatePhone(phone: string): void {
   if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
     throw new Error(`Invalid E.164 phone number: ${phone}`);
   }
+}
+
+function makeRecordEmail(phone: string): string {
+  return `no-email+${phone.replace(/\D/g, "")}@local.invalid`;
 }
 
 async function openDb(projectRoot: string): Promise<{ db: Db; paths: ReturnType<typeof getRuntimePaths> }> {
@@ -253,7 +238,7 @@ async function runSetupOnboarding(projectRoot: string): Promise<void> {
   }
 
   process.stdout.write("Example phone format: +4915123456789\n");
-  process.stdout.write("Delivery modes: public_encrypted (recommended), email, link\n");
+  process.stdout.write("QR delivery mode is fixed to: public_encrypted (public link + separate password)\n");
 
   while (true) {
     const phone = await promptText("Signal phone in E.164 (example: +4915123456789, empty to finish)");
@@ -268,46 +253,8 @@ async function runSetupOnboarding(projectRoot: string): Promise<void> {
       continue;
     }
 
-    const deliveryRaw = await promptText(
-      "Delivery mode [public_encrypted|email|link] (public_encrypted = public link + separate password)",
-      "public_encrypted"
-    );
-    const deliveryMode = parseDeliveryModeInput(deliveryRaw);
-    if (!deliveryMode) {
-      process.stdout.write(`Invalid delivery mode: ${deliveryRaw}\n`);
-      continue;
-    }
-
-    let email = "";
-    if (deliveryMode === "email") {
-      while (true) {
-        const candidate = await promptText("Email for QR delivery (example: user@example.com)");
-        if (!candidate.trim()) {
-          process.stdout.write("Email is required for delivery mode 'email'.\n");
-          continue;
-        }
-        if (!isLikelyEmail(candidate.trim())) {
-          process.stdout.write("Please enter a valid email format (example: user@example.com).\n");
-          continue;
-        }
-        email = candidate.trim();
-        break;
-      }
-    } else {
-      const candidate = (await promptText(
-        "Email for record (optional, example: user@example.com). Leave empty to skip",
-        ""
-      )).trim();
-      if (candidate && !isLikelyEmail(candidate)) {
-        process.stdout.write("Invalid email format, using internal placeholder.\n");
-      }
-      email = candidate && isLikelyEmail(candidate)
-        ? candidate
-        : `no-email+${normalizedPhone.replace(/\D/g, "")}@local.invalid`;
-    }
-
     try {
-      await userAddAction(normalizedPhone, email, deliveryMode, projectRoot);
+      await userAddAction(normalizedPhone, projectRoot);
     } catch (err) {
       process.stdout.write(`Failed to add user ${normalizedPhone}: ${String(err)}\n`);
     }
@@ -408,38 +355,7 @@ function createDeliveryAdapterFromEnv(cfg: Awaited<ReturnType<typeof loadOrCreat
   });
 }
 
-function resolveDeliveryMode(
-  requested: string | undefined,
-  cfg: Awaited<ReturnType<typeof loadOrCreateConfig>>
-): DeliveryMode {
-  const selected = String(requested ?? cfg.delivery.modeDefault).trim().toLowerCase();
-  if (selected === "email") {
-    return "email";
-  }
-  if (selected === "link") {
-    return "link";
-  }
-  if (selected === "public_encrypted" || selected === "public-encrypted" || selected === "public") {
-    return "public_encrypted";
-  }
-  throw new Error(`Unknown delivery mode '${selected}'. Use: email, link, public_encrypted`);
-}
-
-async function deliverQr(
-  mode: DeliveryMode,
-  email: string,
-  pngPath: string,
-  deliveryAdapter: DeliveryAdapter
-) {
-  if (mode === "email") {
-    return await deliveryAdapter.deliverQrByEmail(email, pngPath).catch(async (err) => {
-      logger.warn("email delivery failed; fallback to public_encrypted", { error: String(err) });
-      return await deliveryAdapter.deliverQrByPublicEncrypted(pngPath, { allowLocalFallback: false });
-    });
-  }
-  if (mode === "link") {
-    return await deliveryAdapter.deliverQrByLink(pngPath);
-  }
+async function deliverQr(pngPath: string, deliveryAdapter: DeliveryAdapter) {
   return await deliveryAdapter.deliverQrByPublicEncrypted(pngPath, { allowLocalFallback: false });
 }
 
@@ -568,13 +484,14 @@ program
     });
   });
 
-async function userAddAction(phone: string, email: string, deliver: string | undefined, projectRoot: string): Promise<void> {
+async function userAddAction(phone: string, projectRoot: string): Promise<void> {
   validatePhone(phone);
   const { db, paths, cfg } = await getConfigAndDb(projectRoot);
+  const recordEmail = makeRecordEmail(phone);
 
   let user = await db.getUserByPhone(phone);
   if (!user) {
-    user = await db.addUser(phone, email, getDefaultAgent(cfg));
+    user = await db.addUser(phone, recordEmail, getDefaultAgent(cfg));
   } else {
     const binding = await db.getBinding(user.id, getDefaultAgent(cfg));
     if (!isAgentEnabled(cfg, binding.activeAgent)) {
@@ -586,9 +503,8 @@ async function userAddAction(phone: string, email: string, deliver: string | und
   const uri = await signal.createDeviceLinkUri(`cognal-${phone}`);
   const pngPath = await createQrPng(uri, paths.linksDir, `${phone}-${Date.now()}`);
 
-  const mode = resolveDeliveryMode(deliver, cfg);
   const deliveryAdapter = createDeliveryAdapterFromEnv(cfg);
-  const result = await deliverQr(mode, email, pngPath, deliveryAdapter);
+  const result = await deliverQr(pngPath, deliveryAdapter);
 
   await db.recordDelivery(user.id, result.mode, result.target, null, result.expiresAt ?? null);
   await db.close();
@@ -612,7 +528,6 @@ async function userListAction(projectRoot: string): Promise<void> {
   const rows = users.map((u) => ({
     id: u.id,
     phone: u.phoneE164,
-    email: u.email,
     status: u.status,
     signalAccountId: u.signalAccountId ?? "-",
     createdAt: u.createdAt
@@ -632,7 +547,7 @@ async function userRevokeAction(phone: string, projectRoot: string): Promise<voi
   process.stdout.write(`Revoked user ${phone}\n`);
 }
 
-async function userRelinkAction(phone: string, deliver: string | undefined, projectRoot: string): Promise<void> {
+async function userRelinkAction(phone: string, projectRoot: string): Promise<void> {
   validatePhone(phone);
   const { db, paths, cfg } = await getConfigAndDb(projectRoot);
   const user = await db.getUserByPhone(phone);
@@ -649,8 +564,7 @@ async function userRelinkAction(phone: string, deliver: string | undefined, proj
   const uri = await signal.createDeviceLinkUri(`cognal-${phone}`);
   const pngPath = await createQrPng(uri, paths.linksDir, `${phone}-${Date.now()}`);
   const delivery = createDeliveryAdapterFromEnv(cfg);
-  const mode = resolveDeliveryMode(deliver, cfg);
-  const result = await deliverQr(mode, user.email, pngPath, delivery);
+  const result = await deliverQr(pngPath, delivery);
 
   await db.recordDelivery(user.id, result.mode, result.target, null, result.expiresAt ?? null);
   await db.close();
@@ -666,11 +580,9 @@ const userCommand = program.command("user").description("User management");
 userCommand
   .command("add")
   .requiredOption("--phone <phone>", "Phone in E.164 format")
-  .requiredOption("--email <email>", "User email")
-  .option("--deliver <email|link|public_encrypted>", "Delivery mode")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
-    await userAddAction(opts.phone, opts.email, opts.deliver, projectRoot);
+    await userAddAction(opts.phone, projectRoot);
   });
 
 userCommand
@@ -691,20 +603,17 @@ userCommand
 userCommand
   .command("relink")
   .requiredOption("--phone <phone>", "Phone in E.164 format")
-  .option("--deliver <email|link|public_encrypted>", "Delivery mode")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
-    await userRelinkAction(opts.phone, opts.deliver, projectRoot);
+    await userRelinkAction(opts.phone, projectRoot);
   });
 
 program
   .command("user:add")
   .requiredOption("--phone <phone>", "Phone in E.164 format")
-  .requiredOption("--email <email>", "User email")
-  .option("--deliver <email|link|public_encrypted>", "Delivery mode")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
-    await userAddAction(opts.phone, opts.email, opts.deliver, projectRoot);
+    await userAddAction(opts.phone, projectRoot);
   });
 
 program
@@ -725,10 +634,9 @@ program
 program
   .command("user:relink")
   .requiredOption("--phone <phone>", "Phone in E.164 format")
-  .option("--deliver <email|link|public_encrypted>", "Delivery mode")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
-    await userRelinkAction(opts.phone, opts.deliver, projectRoot);
+    await userRelinkAction(opts.phone, projectRoot);
   });
 
 program

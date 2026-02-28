@@ -4,6 +4,10 @@ import { createHash } from "node:crypto";
 import TOML from "@iarna/toml";
 import type { AgentType } from "./types.js";
 
+const DEFAULT_PUBLIC_DUMP_ENDPOINT = "https://uguu.se/upload.php";
+const DEFAULT_PUBLIC_DUMP_FILE_FIELD = "files[]";
+const LEGACY_PUBLIC_DUMP_ENDPOINT = "https://0x0.st";
+
 export type ProviderSelection = "claude" | "codex" | "both";
 export interface EnabledAgents {
   claude: boolean;
@@ -44,7 +48,7 @@ export interface CognalConfig {
     apiKeyEnv: string;
   };
   delivery: {
-    modeDefault: "email" | "link" | "public_encrypted";
+    modeDefault: "public_encrypted";
     resend: {
       apiKeyEnv: string;
       from: string;
@@ -159,8 +163,8 @@ export function defaultConfig(projectRoot: string): CognalConfig {
         presignedTtlSec: 900
       },
       publicDump: {
-        endpoint: "https://0x0.st",
-        fileField: "file",
+        endpoint: DEFAULT_PUBLIC_DUMP_ENDPOINT,
+        fileField: DEFAULT_PUBLIC_DUMP_FILE_FIELD,
         timeoutSec: 25
       }
     },
@@ -221,15 +225,25 @@ export function normalizeConfig(cfg: CognalConfig, projectRoot = cfg.projectId):
 
   if (!normalized.delivery.publicDump) {
     normalized.delivery.publicDump = {
-      endpoint: "https://0x0.st",
-      fileField: "file",
+      endpoint: DEFAULT_PUBLIC_DUMP_ENDPOINT,
+      fileField: DEFAULT_PUBLIC_DUMP_FILE_FIELD,
       timeoutSec: 25
     };
+  } else {
+    const endpoint = normalized.delivery.publicDump.endpoint?.trim();
+    const fileField = normalized.delivery.publicDump.fileField?.trim();
+    if (!endpoint || endpoint === LEGACY_PUBLIC_DUMP_ENDPOINT) {
+      normalized.delivery.publicDump.endpoint = DEFAULT_PUBLIC_DUMP_ENDPOINT;
+    }
+    if (!fileField || endpoint === LEGACY_PUBLIC_DUMP_ENDPOINT) {
+      normalized.delivery.publicDump.fileField = DEFAULT_PUBLIC_DUMP_FILE_FIELD;
+    }
+    if (!normalized.delivery.publicDump.timeoutSec || normalized.delivery.publicDump.timeoutSec <= 0) {
+      normalized.delivery.publicDump.timeoutSec = 25;
+    }
   }
 
-  if (!normalized.delivery.modeDefault) {
-    normalized.delivery.modeDefault = "public_encrypted";
-  }
+  normalized.delivery.modeDefault = "public_encrypted";
 
   return normalized;
 }

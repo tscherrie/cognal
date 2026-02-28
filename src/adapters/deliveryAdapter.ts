@@ -175,28 +175,95 @@ export class DeliveryAdapter {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.cfg.publicDump.timeoutSec * 1000);
 
-    const response = await fetch(this.cfg.publicDump.endpoint, {
-      method: "POST",
-      body,
-      signal: controller.signal
-    }).finally(() => {
-      clearTimeout(timeout);
-    });
+    let response: Response;
+    try {
+      response = await fetch(this.cfg.publicDump.endpoint, {
+        method: "POST",
+        body,
+        signal: controller.signal
+      }).finally(() => {
+        clearTimeout(timeout);
+      });
+    } catch (err) {
+      throw new Error(`public upload request failed (${this.describeError(err)})`);
+    }
 
     if (!response.ok) {
       throw new Error(`public upload failed (${response.status})`);
     }
 
     const text = (await response.text()).trim();
-    const url = text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find((line) => /^https?:\/\//i.test(line));
+    const url = this.extractFirstUrl(text);
 
     if (!url) {
       throw new Error(`public upload did not return URL: ${text}`);
     }
 
     return url;
+  }
+
+  private describeError(err: unknown): string {
+    if (err instanceof Error) {
+      const withCause = err as Error & { cause?: unknown };
+      if (withCause.cause) {
+        if (typeof withCause.cause === "object" && withCause.cause !== null) {
+          const maybeCode = (withCause.cause as { code?: string }).code;
+          const maybeMessage = (withCause.cause as { message?: string }).message;
+          if (maybeCode && maybeMessage) {
+            return `${err.message}; cause=${maybeCode}: ${maybeMessage}`;
+          }
+          if (maybeCode) {
+            return `${err.message}; cause=${maybeCode}`;
+          }
+          if (maybeMessage) {
+            return `${err.message}; cause=${maybeMessage}`;
+          }
+        }
+        return `${err.message}; cause=${String(withCause.cause)}`;
+      }
+      return err.message;
+    }
+    return String(err);
+  }
+
+  private extractFirstUrl(text: string): string | undefined {
+    const fromLines = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => /^https?:\/\//i.test(line));
+    if (fromLines) {
+      return fromLines;
+    }
+
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      return this.findUrlInUnknown(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private findUrlInUnknown(value: unknown): string | undefined {
+    if (typeof value === "string" && /^https?:\/\//i.test(value)) {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = this.findUrlInUnknown(item);
+        if (found) {
+          return found;
+        }
+      }
+      return undefined;
+    }
+    if (typeof value === "object" && value !== null) {
+      for (const next of Object.values(value)) {
+        const found = this.findUrlInUnknown(next);
+        if (found) {
+          return found;
+        }
+      }
+    }
+    return undefined;
   }
 }
