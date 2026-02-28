@@ -17,7 +17,7 @@ import {
   isAgentEnabled
 } from "./config.js";
 import { Db } from "./core/db.js";
-import { commandExists, runCommand, safeFileName } from "./core/utils.js";
+import { commandExists, runCommand, runInteractiveCommand, safeFileName } from "./core/utils.js";
 import { Logger } from "./core/logger.js";
 import type { HealthCheckResult } from "./types.js";
 import type { CognalConfig, ProviderSelection } from "./config.js";
@@ -126,16 +126,23 @@ WantedBy=multi-user.target
     return;
   }
 
-  const copy = await runCommand("bash", ["-lc", `sudo cp '${localUnitPath}' /etc/systemd/system/cognald.service`], { timeoutMs: 10_000 });
-  if (copy.code !== 0) {
+  const copyCode = await runInteractiveCommand("bash", ["-lc", `sudo cp '${localUnitPath}' /etc/systemd/system/cognald.service`]);
+  if (copyCode !== 0) {
     logger.warn("could not install systemd unit automatically", {
-      stderr: copy.stderr.trim() || copy.stdout.trim(),
+      stderr: "sudo cp failed",
       hint: `Manual install: sudo cp '${localUnitPath}' /etc/systemd/system/cognald.service`
     });
     return;
   }
 
-  await runCommand("bash", ["-lc", "sudo systemctl daemon-reload && sudo systemctl enable --now cognald"], { timeoutMs: 20_000 });
+  const enableCode = await runInteractiveCommand("bash", ["-lc", "sudo systemctl daemon-reload && sudo systemctl enable --now cognald"]);
+  if (enableCode !== 0) {
+    logger.warn("could not enable cognald automatically", {
+      stderr: "sudo systemctl enable/start failed",
+      hint: "Run: sudo systemctl daemon-reload && sudo systemctl enable --now cognald"
+    });
+    return;
+  }
   logger.info("systemd unit installed", { service: "cognald" });
 }
 
@@ -312,9 +319,9 @@ program
 program
   .command("start")
   .action(async () => {
-    const result = await runCommand("bash", ["-lc", "sudo systemctl start cognald"], { timeoutMs: 10_000 });
-    if (result.code !== 0) {
-      throw new Error(`Failed to start cognald: ${result.stderr || result.stdout}`);
+    const result = await runInteractiveCommand("bash", ["-lc", "sudo systemctl start cognald"]);
+    if (result !== 0) {
+      throw new Error("Failed to start cognald");
     }
     process.stdout.write("cognald started\n");
   });
@@ -322,9 +329,9 @@ program
 program
   .command("stop")
   .action(async () => {
-    const result = await runCommand("bash", ["-lc", "sudo systemctl stop cognald"], { timeoutMs: 10_000 });
-    if (result.code !== 0) {
-      throw new Error(`Failed to stop cognald: ${result.stderr || result.stdout}`);
+    const result = await runInteractiveCommand("bash", ["-lc", "sudo systemctl stop cognald"]);
+    if (result !== 0) {
+      throw new Error("Failed to stop cognald");
     }
     process.stdout.write("cognald stopped\n");
   });
@@ -332,9 +339,9 @@ program
 program
   .command("restart")
   .action(async () => {
-    const result = await runCommand("bash", ["-lc", "sudo systemctl restart cognald"], { timeoutMs: 10_000 });
-    if (result.code !== 0) {
-      throw new Error(`Failed to restart cognald: ${result.stderr || result.stdout}`);
+    const result = await runInteractiveCommand("bash", ["-lc", "sudo systemctl restart cognald"]);
+    if (result !== 0) {
+      throw new Error("Failed to restart cognald");
     }
     process.stdout.write("cognald restarted\n");
   });
@@ -564,6 +571,16 @@ program
 
     for (const step of steps) {
       process.stdout.write(`==> ${step.title}\n`);
+      const needsInteractive = /\bsudo\b/.test(step.command);
+      if (needsInteractive) {
+        const exitCode = await runInteractiveCommand("bash", ["-lc", step.command]);
+        if (exitCode !== 0) {
+          process.stdout.write(`[WARN] ${step.title} failed\n`);
+        } else {
+          process.stdout.write("[OK]\n");
+        }
+        continue;
+      }
       const result = await runCommand("bash", ["-lc", step.command], { timeoutMs: 120_000 });
       if (result.code !== 0) {
         process.stdout.write(`[WARN] ${step.title} failed\n${result.stderr || result.stdout}\n`);

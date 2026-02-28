@@ -68,6 +68,31 @@ export function runCommand(
   });
 }
 
+export function runInteractiveCommand(
+  cmd: string,
+  args: string[],
+  options: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+  } = {}
+): Promise<number> {
+  return new Promise((resolve) => {
+    const proc = spawn(cmd, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: "inherit"
+    });
+
+    proc.on("close", (code) => {
+      resolve(code ?? 0);
+    });
+
+    proc.on("error", () => {
+      resolve(-1);
+    });
+  });
+}
+
 export async function commandExists(command: string): Promise<boolean> {
   const result = await runCommand("bash", ["-lc", `command -v ${command}`], { timeoutMs: 3000 });
   return result.code === 0;
