@@ -5,6 +5,7 @@ Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Signal messages to Clau
 ## Key behavior
 
 - Multi-user whitelist (phone + email).
+- Multi-project capable on one server (project-scoped service name).
 - Signal onboarding via device-linking QR.
 - `/claude` and `/codex` switch active agent per user.
 - All other slash commands are passed through unchanged.
@@ -45,7 +46,17 @@ cognal setup --providers codex
 cognal setup --providers both
 ```
 
-This creates `./.cognal/config.toml`, SQLite state, and attempts to install/start `cognald.service`.
+This creates `./.cognal/config.toml`, SQLite state, and installs/starts a project-scoped systemd service.
+
+Each project gets its own systemd unit name, e.g. `cognald-myproj-a1b2c3d4`.
+Use `-p` to target another project root:
+
+```bash
+cognal -p /srv/project-a setup
+cognal -p /srv/project-b setup
+cognal -p /srv/project-a status
+cognal -p /srv/project-b logs --follow
+```
 
 ## Core commands
 
@@ -87,6 +98,7 @@ Main config path: `./.cognal/config.toml`
 Important fields:
 
 - `signal.command`, `signal.dataDir`
+- `runtime.serviceName` (project-scoped unit)
 - `agents.enabled` (`claude`, `codex` booleans)
 - `agents.claude.command`, `agents.codex.command`
 - `routing.failoverEnabled`

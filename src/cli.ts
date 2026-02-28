@@ -87,6 +87,16 @@ async function openDb(projectRoot: string): Promise<{ db: Db; paths: ReturnType<
   return { db, paths };
 }
 
+async function loadProjectConfig(projectRoot: string): Promise<{
+  paths: ReturnType<typeof getRuntimePaths>;
+  cfg: Awaited<ReturnType<typeof loadOrCreateConfig>>;
+}> {
+  const paths = getRuntimePaths(projectRoot);
+  await ensureRuntimeDirs(paths);
+  const cfg = await loadOrCreateConfig(paths);
+  return { paths, cfg };
+}
+
 async function getConfigAndDb(projectRoot: string): Promise<{
   db: Db;
   paths: ReturnType<typeof getRuntimePaths>;
@@ -97,7 +107,9 @@ async function getConfigAndDb(projectRoot: string): Promise<{
   return { db, paths, cfg };
 }
 
-async function installSystemdUnit(projectRoot: string): Promise<void> {
+async function installSystemdUnit(projectRoot: string, cfg: CognalConfig): Promise<void> {
+  const serviceName = cfg.runtime.serviceName;
+  const runUser = process.env.SUDO_USER || process.env.USER || "root";
   const unit = `[Unit]
 Description=Cognal Daemon
 After=network.target
@@ -107,6 +119,7 @@ Type=simple
 WorkingDirectory=${projectRoot}
 EnvironmentFile=${projectRoot}/.cognal/cognald.env
 ExecStart=${process.execPath} ${projectRoot}/dist/daemon.js
+User=${runUser}
 Restart=always
 RestartSec=2
 
@@ -115,7 +128,7 @@ WantedBy=multi-user.target
 `;
 
   const paths = getRuntimePaths(projectRoot);
-  const localUnitPath = path.join(paths.cognalDir, "cognald.service");
+  const localUnitPath = path.join(paths.cognalDir, `${serviceName}.service`);
   const envPath = path.join(paths.cognalDir, "cognald.env");
   await fs.writeFile(localUnitPath, unit, "utf8");
   await fs.writeFile(envPath, `COGNAL_PROJECT_ROOT=${projectRoot}\n`, "utf8");
@@ -126,24 +139,24 @@ WantedBy=multi-user.target
     return;
   }
 
-  const copyCode = await runInteractiveCommand("bash", ["-lc", `sudo cp '${localUnitPath}' /etc/systemd/system/cognald.service`]);
+  const copyCode = await runInteractiveCommand("bash", ["-lc", `sudo cp '${localUnitPath}' /etc/systemd/system/${serviceName}.service`]);
   if (copyCode !== 0) {
     logger.warn("could not install systemd unit automatically", {
       stderr: "sudo cp failed",
-      hint: `Manual install: sudo cp '${localUnitPath}' /etc/systemd/system/cognald.service`
+      hint: `Manual install: sudo cp '${localUnitPath}' /etc/systemd/system/${serviceName}.service`
     });
     return;
   }
 
-  const enableCode = await runInteractiveCommand("bash", ["-lc", "sudo systemctl daemon-reload && sudo systemctl enable --now cognald"]);
+  const enableCode = await runInteractiveCommand("bash", ["-lc", `sudo systemctl daemon-reload && sudo systemctl enable --now ${serviceName}`]);
   if (enableCode !== 0) {
-    logger.warn("could not enable cognald automatically", {
+    logger.warn("could not enable service automatically", {
       stderr: "sudo systemctl enable/start failed",
-      hint: "Run: sudo systemctl daemon-reload && sudo systemctl enable --now cognald"
+      hint: `Run: sudo systemctl daemon-reload && sudo systemctl enable --now ${serviceName}`
     });
     return;
   }
-  logger.info("systemd unit installed", { service: "cognald" });
+  logger.info("systemd unit installed", { service: serviceName });
 }
 
 async function runProviderSetup(command: string): Promise<void> {
@@ -193,6 +206,21 @@ async function doctorChecks(projectRoot: string, cfg: CognalConfig): Promise<Hea
   } catch {
     checks.push({ name: "config", ok: false, details: "missing config.toml" });
   }
+
+  const serviceName = cfg.runtime.serviceName;
+  const serviceEnabled = await runCommand("bash", ["-lc", `systemctl is-enabled ${serviceName}`], { timeoutMs: 3_000 });
+  checks.push({
+    name: `service:${serviceName}:enabled`,
+    ok: serviceEnabled.code === 0,
+    details: serviceEnabled.stdout.trim() || serviceEnabled.stderr.trim() || "unknown"
+  });
+
+  const serviceActive = await runCommand("bash", ["-lc", `systemctl is-active ${serviceName}`], { timeoutMs: 3_000 });
+  checks.push({
+    name: `service:${serviceName}:active`,
+    ok: serviceActive.code === 0,
+    details: serviceActive.stdout.trim() || serviceActive.stderr.trim() || "unknown"
+  });
 
   return checks;
 }
@@ -311,53 +339,65 @@ program
       }
     }
 
-    await installSystemdUnit(projectRoot);
+    await installSystemdUnit(projectRoot, cfg);
     await db.close();
     process.stdout.write("Setup complete. Run 'cognal doctor' for final verification.\n");
   });
 
 program
   .command("start")
-  .action(async () => {
-    const result = await runInteractiveCommand("bash", ["-lc", "sudo systemctl start cognald"]);
+  .action(async (_, cmd) => {
+    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const { cfg } = await loadProjectConfig(projectRoot);
+    const result = await runInteractiveCommand("bash", ["-lc", `sudo systemctl start ${cfg.runtime.serviceName}`]);
     if (result !== 0) {
-      throw new Error("Failed to start cognald");
+      throw new Error(`Failed to start ${cfg.runtime.serviceName}`);
     }
-    process.stdout.write("cognald started\n");
+    process.stdout.write(`${cfg.runtime.serviceName} started\n`);
   });
 
 program
   .command("stop")
-  .action(async () => {
-    const result = await runInteractiveCommand("bash", ["-lc", "sudo systemctl stop cognald"]);
+  .action(async (_, cmd) => {
+    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const { cfg } = await loadProjectConfig(projectRoot);
+    const result = await runInteractiveCommand("bash", ["-lc", `sudo systemctl stop ${cfg.runtime.serviceName}`]);
     if (result !== 0) {
-      throw new Error("Failed to stop cognald");
+      throw new Error(`Failed to stop ${cfg.runtime.serviceName}`);
     }
-    process.stdout.write("cognald stopped\n");
+    process.stdout.write(`${cfg.runtime.serviceName} stopped\n`);
   });
 
 program
   .command("restart")
-  .action(async () => {
-    const result = await runInteractiveCommand("bash", ["-lc", "sudo systemctl restart cognald"]);
+  .action(async (_, cmd) => {
+    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const { cfg } = await loadProjectConfig(projectRoot);
+    const result = await runInteractiveCommand("bash", ["-lc", `sudo systemctl restart ${cfg.runtime.serviceName}`]);
     if (result !== 0) {
-      throw new Error("Failed to restart cognald");
+      throw new Error(`Failed to restart ${cfg.runtime.serviceName}`);
     }
-    process.stdout.write("cognald restarted\n");
+    process.stdout.write(`${cfg.runtime.serviceName} restarted\n`);
   });
 
 program
   .command("status")
-  .action(async () => {
-    const result = await runCommand("bash", ["-lc", "systemctl is-active cognald"], { timeoutMs: 3_000 });
+  .action(async (_, cmd) => {
+    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const { cfg } = await loadProjectConfig(projectRoot);
+    const result = await runCommand("bash", ["-lc", `systemctl is-active ${cfg.runtime.serviceName}`], { timeoutMs: 3_000 });
     process.stdout.write((result.stdout.trim() || "unknown") + "\n");
   });
 
 program
   .command("logs")
   .option("--follow", "Follow logs", false)
-  .action(async (opts) => {
-    const args = opts.follow ? ["-u", "cognald", "-f"] : ["-u", "cognald", "-n", "200"];
+  .action(async (opts, cmd) => {
+    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const { cfg } = await loadProjectConfig(projectRoot);
+    const args = opts.follow
+      ? ["-u", cfg.runtime.serviceName, "-f"]
+      : ["-u", cfg.runtime.serviceName, "-n", "200"];
     const proc = spawn("journalctl", args, { stdio: "inherit" });
     await new Promise<void>((resolve) => {
       proc.on("exit", () => resolve());
@@ -565,8 +605,8 @@ program
     }
     steps.push(
       { title: "Update signal-cli", command: "sudo apt-get update && sudo apt-get install -y --only-upgrade signal-cli" },
-      { title: "Restart cognald", command: "sudo systemctl restart cognald" },
-      { title: "Run doctor", command: `cd '${projectRoot}' && ${process.execPath} dist/cli.js doctor` }
+      { title: `Restart ${cfg.runtime.serviceName}`, command: `sudo systemctl restart ${cfg.runtime.serviceName}` },
+      { title: "Run doctor", command: `cd '${projectRoot}' && ${process.execPath} dist/cli.js -p '${projectRoot}' doctor` }
     );
 
     for (const step of steps) {

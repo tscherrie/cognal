@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import TOML from "@iarna/toml";
 import type { AgentType } from "./types.js";
 
@@ -14,6 +15,7 @@ export interface CognalConfig {
   runtime: {
     osMode: "linux";
     distro: "ubuntu" | "debian";
+    serviceName: string;
   };
   signal: {
     command: string;
@@ -80,6 +82,7 @@ export interface RuntimePaths {
   tempDir: string;
   linksDir: string;
   logsDir: string;
+  signalDir: string;
   pidPath: string;
 }
 
@@ -93,8 +96,20 @@ export function getRuntimePaths(projectRoot: string): RuntimePaths {
     tempDir: path.join(cognalDir, "tmp"),
     linksDir: path.join(cognalDir, "links"),
     logsDir: path.join(cognalDir, "logs"),
+    signalDir: path.join(cognalDir, "signal-cli"),
     pidPath: path.join(cognalDir, "cognald.pid")
   };
+}
+
+function slugify(input: string): string {
+  const out = input.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return out || "project";
+}
+
+export function computeServiceName(projectRoot: string, projectId?: string): string {
+  const id = slugify(projectId ?? path.basename(projectRoot));
+  const hash = createHash("sha1").update(projectRoot).digest("hex").slice(0, 8);
+  return `cognald-${id}-${hash}`;
 }
 
 export function defaultConfig(projectRoot: string): CognalConfig {
@@ -103,11 +118,12 @@ export function defaultConfig(projectRoot: string): CognalConfig {
     projectId,
     runtime: {
       osMode: "linux",
-      distro: "ubuntu"
+      distro: "ubuntu",
+      serviceName: computeServiceName(projectRoot, projectId)
     },
     signal: {
       command: "signal-cli",
-      dataDir: "/var/lib/signal-cli",
+      dataDir: path.join(projectRoot, ".cognal", "signal-cli"),
       receiveTimeoutSec: 5
     },
     agents: {
@@ -164,12 +180,13 @@ export async function ensureRuntimeDirs(paths: RuntimePaths): Promise<void> {
   await fs.mkdir(paths.tempDir, { recursive: true });
   await fs.mkdir(paths.linksDir, { recursive: true });
   await fs.mkdir(paths.logsDir, { recursive: true });
+  await fs.mkdir(paths.signalDir, { recursive: true });
 }
 
 export async function loadConfig(paths: RuntimePaths): Promise<CognalConfig> {
   const raw = await fs.readFile(paths.configPath, "utf8");
   const parsed = TOML.parse(raw) as unknown as CognalConfig;
-  return normalizeConfig(parsed);
+  return normalizeConfig(parsed, paths.projectRoot);
 }
 
 export async function saveConfig(paths: RuntimePaths, cfg: CognalConfig): Promise<void> {
@@ -187,8 +204,14 @@ export async function loadOrCreateConfig(paths: RuntimePaths): Promise<CognalCon
   }
 }
 
-export function normalizeConfig(cfg: CognalConfig): CognalConfig {
+export function normalizeConfig(cfg: CognalConfig, projectRoot = cfg.projectId): CognalConfig {
   const normalized = cfg;
+  if (!normalized.runtime.serviceName) {
+    normalized.runtime.serviceName = computeServiceName(projectRoot, normalized.projectId);
+  }
+  if (!normalized.signal.dataDir) {
+    normalized.signal.dataDir = path.join(projectRoot, ".cognal", "signal-cli");
+  }
   if (!normalized.agents.enabled) {
     normalized.agents.enabled = { claude: true, codex: true };
   }
