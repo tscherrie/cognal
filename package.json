@@ -1,0 +1,40 @@
+{
+  "name": "cognal",
+  "version": "0.1.0",
+  "description": "Signal bridge for Claude Code and Codex with single-active-agent runtime",
+  "type": "module",
+  "bin": {
+    "cognal": "dist/cli.js",
+    "cognald": "dist/daemon.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev:cli": "tsx src/cli.ts",
+    "dev:daemon": "tsx src/daemon.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.924.0",
+    "@aws-sdk/s3-request-presigner": "^3.924.0",
+    "@iarna/toml": "^2.2.5",
+    "commander": "^14.0.2",
+    "mime-types": "^3.0.1",
+    "openai": "^6.7.0",
+    "qrcode": "^1.5.4",
+    "resend": "^6.4.0",
+    "sqlite3": "^5.1.7",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/mime-types": "^3.0.1",
+    "@types/node": "^24.5.2",
+    "@types/qrcode": "^1.5.5",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
