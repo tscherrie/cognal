@@ -656,6 +656,14 @@ program
         providerAuthModes.set(spec.command, authMode);
 
         if (authMode !== "api_key") {
+          if (spec.label === "Claude" && (process.env.SSH_CONNECTION || process.env.SSH_CLIENT || process.env.SSH_TTY)) {
+            process.stdout.write(
+              "[WARN] Claude auth_login on SSH/headless hosts may hang after browser auth because the localhost callback cannot complete reliably.\n"
+            );
+            process.stdout.write(
+              "[WARN] If login does not complete, re-run setup and choose api_key instead.\n"
+            );
+          }
           continue;
         }
 
