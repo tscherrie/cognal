@@ -32,6 +32,13 @@ const DIST_DIR = path.dirname(CLI_ENTRYPOINT_PATH);
 const DAEMON_ENTRYPOINT_PATH = path.join(DIST_DIR, "daemon.js");
 const INSTALL_ROOT = path.dirname(DIST_DIR);
 
+interface ProviderRuntimeSpec {
+  label: "Claude" | "Codex";
+  command: string;
+  installPackage: string;
+  setupArgs: string[];
+}
+
 function parseProviderSelection(value: string): ProviderSelection {
   const normalized = value.trim().toLowerCase();
   if (normalized === "claude" || normalized === "codex" || normalized === "both") {
@@ -289,12 +296,45 @@ async function runSetupOnboarding(projectRoot: string): Promise<void> {
   }
 }
 
-async function runProviderSetup(command: string): Promise<void> {
+function enabledProviderSpecs(cfg: CognalConfig): ProviderRuntimeSpec[] {
+  const specs: ProviderRuntimeSpec[] = [];
+  if (cfg.agents.enabled.claude) {
+    specs.push({
+      label: "Claude",
+      command: cfg.agents.claude.command,
+      installPackage: "@anthropic-ai/claude-code@latest",
+      setupArgs: ["auth", "login"]
+    });
+  }
+  if (cfg.agents.enabled.codex) {
+    specs.push({
+      label: "Codex",
+      command: cfg.agents.codex.command,
+      installPackage: "@openai/codex@latest",
+      setupArgs: ["login"]
+    });
+  }
+  return specs;
+}
+
+async function installProviderCli(spec: ProviderRuntimeSpec): Promise<void> {
+  process.stdout.write(`Installing ${spec.label} CLI (${spec.installPackage})...\n`);
+  const code = await runInteractiveCommand("npm", ["i", "-g", spec.installPackage]);
+  if (code !== 0) {
+    throw new Error(`Failed to install ${spec.label} CLI via npm i -g ${spec.installPackage}`);
+  }
+  const ok = await commandExists(spec.command);
+  if (!ok) {
+    throw new Error(`${spec.label} CLI install completed but '${spec.command}' is still missing in PATH`);
+  }
+}
+
+async function runProviderSetupWithArgs(command: string, args: string[]): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const proc = spawn(command, [], { stdio: "inherit" });
+    const proc = spawn(command, args, { stdio: "inherit" });
     proc.on("exit", (code) => {
       if ((code ?? 0) !== 0) {
-        reject(new Error(`${command} setup exited with code ${code}`));
+        reject(new Error(`${command} ${args.join(" ")} exited with code ${code}`));
         return;
       }
       resolve();
@@ -455,6 +495,8 @@ program
 program
   .command("setup")
   .option("--run-provider-setup", "Run native Claude/Codex setup flows", false)
+  .option("--skip-provider-install", "Skip automatic install for missing provider CLIs", false)
+  .option("--skip-provider-setup", "Skip native provider login/setup flows", false)
   .option("--distro <ubuntu|debian>", "Set distro in config")
   .option("--providers <claude|codex|both>", "Enabled providers")
   .option("--skip-onboarding", "Skip interactive user onboarding", false)
@@ -479,14 +521,43 @@ program
       process.stdout.write(`${check.ok ? "[OK]" : "[WARN]"} ${check.name} -> ${check.details}\n`);
     }
 
-    if (opts.runProviderSetup) {
-      if (cfg.agents.enabled.claude) {
-        process.stdout.write("Running native Claude setup...\n");
-        await runProviderSetup(cfg.agents.claude.command);
+    const providerSpecs = enabledProviderSpecs(cfg);
+
+    if (!opts.skipProviderInstall) {
+      for (const spec of providerSpecs) {
+        const exists = await commandExists(spec.command);
+        if (exists) {
+          continue;
+        }
+        const installNow = await promptYesNo(`${spec.label} CLI is missing. Install it now?`, true);
+        if (!installNow) {
+          process.stdout.write(`[WARN] ${spec.label} CLI still missing. Install manually: npm i -g ${spec.installPackage}\n`);
+          continue;
+        }
+        await installProviderCli(spec);
+        process.stdout.write(`[OK] ${spec.label} CLI installed.\n`);
       }
-      if (cfg.agents.enabled.codex) {
-        process.stdout.write("Running native Codex setup...\n");
-        await runProviderSetup(cfg.agents.codex.command);
+    }
+
+    let shouldRunProviderSetup = false;
+    if (!opts.skipProviderSetup) {
+      if (opts.runProviderSetup) {
+        shouldRunProviderSetup = true;
+      } else {
+        const defaultRunProviderSetup = process.stdin.isTTY && process.stdout.isTTY;
+        shouldRunProviderSetup = await promptYesNo("Run native provider setup/login now?", defaultRunProviderSetup);
+      }
+    }
+
+    if (shouldRunProviderSetup) {
+      for (const spec of providerSpecs) {
+        const exists = await commandExists(spec.command);
+        if (!exists) {
+          process.stdout.write(`[WARN] Skipping ${spec.label} setup because '${spec.command}' is missing.\n`);
+          continue;
+        }
+        process.stdout.write(`Running native ${spec.label} setup...\n`);
+        await runProviderSetupWithArgs(spec.command, spec.setupArgs);
       }
     }
 

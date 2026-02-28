@@ -61,16 +61,21 @@ curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/refs/heads/main/sc
 ## Setup
 
 ```bash
-cognal setup --run-provider-setup --distro ubuntu
+cognal setup --distro ubuntu
 ```
 
 `cognal setup` interactively asks which providers should be enabled: `claude`, `codex`, or `both`.
+If an enabled provider CLI is missing, setup offers to install it automatically (`npm i -g ...`).
+Setup also asks whether to run the native provider login/setup flows right away.
 You can also force this non-interactively:
 
 ```bash
 cognal setup --providers claude
 cognal setup --providers codex
 cognal setup --providers both
+cognal setup --run-provider-setup
+cognal setup --skip-provider-install
+cognal setup --skip-provider-setup
 ```
 
 This creates `./.cognal/config.toml`, SQLite state, and installs/starts a project-scoped systemd service.
