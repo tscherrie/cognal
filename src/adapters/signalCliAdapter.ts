@@ -110,20 +110,33 @@ export class SignalCliAdapter {
 
   async createDeviceLinkUri(name: string): Promise<string> {
     const args = ["--config", this.dataDir, "link", "-n", name];
-    const result = await runCommand(this.command, args, { timeoutMs: 10_000 });
+    const result = await runCommand(this.command, args, { timeoutMs: 25_000 });
     const output = `${result.stdout}\n${result.stderr}`;
 
-    const uri = output
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find((line) => line.startsWith("sgnl://"));
+    if (result.code !== 0) {
+      throw new Error(`signal-cli link failed (exit ${result.code}): ${output.trim()}`);
+    }
 
-    if (uri) {
+    const directMatch = output.match(/sgnl:\/\/linkdevice\?[^\s"'`<>]+/);
+    if (directMatch) {
+      const uri = directMatch[0];
+      if (!uri.includes("pub_key=") || !uri.includes("uuid=")) {
+        throw new Error(`signal-cli returned incomplete link URI: ${uri}`);
+      }
       return uri;
     }
 
-    // Fallback tokenized URI for dry-run/test environments.
-    return `sgnl://linkdevice?uuid=${randomUUID()}&name=${encodeURIComponent(name)}`;
+    const legacyMatch = output.match(/tsdevice:\/\?[^\s"'`<>]+/);
+    if (legacyMatch) {
+      const query = legacyMatch[0].slice("tsdevice:/?".length);
+      const uri = `sgnl://linkdevice?${query}`;
+      if (!uri.includes("pub_key=") || !uri.includes("uuid=")) {
+        throw new Error(`signal-cli returned incomplete legacy link URI: ${legacyMatch[0]}`);
+      }
+      return uri;
+    }
+
+    throw new Error(`signal-cli link output did not contain a valid device-link URI: ${output.trim()}`);
   }
 
   async tryResolveLinkedAccount(phoneE164: string): Promise<string | null> {
