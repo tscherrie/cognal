@@ -8,7 +8,7 @@
     "cognald": "dist/daemon.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js dist/daemon.js",
     "dev:cli": "tsx src/cli.ts",
     "dev:daemon": "tsx src/daemon.ts",
     "test": "vitest run",
