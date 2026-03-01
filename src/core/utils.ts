@@ -41,16 +41,27 @@ export function runCommand(
 
     let timedOut = false;
     let timeoutHandle: NodeJS.Timeout | null = null;
+    let forceKillHandle: NodeJS.Timeout | null = null;
     if (options.timeoutMs && options.timeoutMs > 0) {
       timeoutHandle = setTimeout(() => {
         timedOut = true;
         proc.kill("SIGTERM");
+        forceKillHandle = setTimeout(() => {
+          try {
+            proc.kill("SIGKILL");
+          } catch {
+            // ignore hard-kill errors
+          }
+        }, 3000);
       }, options.timeoutMs);
     }
 
     proc.on("close", (code) => {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
+      }
+      if (forceKillHandle) {
+        clearTimeout(forceKillHandle);
       }
       resolve({
         code: timedOut ? -1 : code ?? 0,
@@ -62,6 +73,9 @@ export function runCommand(
     proc.on("error", (err) => {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
+      }
+      if (forceKillHandle) {
+        clearTimeout(forceKillHandle);
       }
       resolve({ code: -1, stdout, stderr: `${stderr}\n${err.message}` });
     });
