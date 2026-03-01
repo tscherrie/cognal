@@ -142,6 +142,19 @@ function parseCsv(input: string): string[] {
     .filter(Boolean);
 }
 
+function printTelegramBotFatherGuide(tokenEnvName: string): void {
+  process.stdout.write("\nTelegram Bot Setup (BotFather) - step by step:\n");
+  process.stdout.write("  1) Open Telegram and search for @BotFather\n");
+  process.stdout.write("  2) Send /start\n");
+  process.stdout.write("  3) Send /newbot\n");
+  process.stdout.write("  4) Enter a display name (example: Cognal Project Bot)\n");
+  process.stdout.write("  5) Enter a unique username ending with 'bot' (example: cognal_myproj_bot)\n");
+  process.stdout.write("  6) BotFather returns an HTTP API token (format: 123456789:AA...)\n");
+  process.stdout.write("  7) Paste that token below into this setup prompt\n");
+  process.stdout.write("  8) Optional: use /setprivacy in BotFather and disable privacy for richer group context\n");
+  process.stdout.write(`  9) Cognal stores this token in ./.cognal/cognald.env as ${tokenEnvName}\n\n`);
+}
+
 function parseEnvFile(raw: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const line of raw.split(/\r?\n/)) {
@@ -532,6 +545,9 @@ program
     const envPath = path.join(paths.cognalDir, "cognald.env");
     const daemonEnv = await readDaemonEnv(envPath);
     const currentToken = daemonEnv[cfg.telegram.botTokenEnv] || process.env[cfg.telegram.botTokenEnv] || "";
+    if (process.stdin.isTTY && process.stdout.isTTY && !currentToken) {
+      printTelegramBotFatherGuide(cfg.telegram.botTokenEnv);
+    }
     const tokenPrompt = currentToken ? `${cfg.telegram.botTokenEnv} (leave empty to keep current)` : `${cfg.telegram.botTokenEnv}`;
     const enteredToken = (await promptText(`Telegram bot token ${tokenPrompt}`)).trim();
     const finalToken = enteredToken || currentToken;

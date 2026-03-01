@@ -65,6 +65,16 @@ cognal setup --distro ubuntu
 6. Optional provider auth flow (`api_key` or native `auth_login`).
 7. Create `./.cognal/config.toml`, SQLite state, and install/start project-scoped `systemd` service.
 
+During interactive setup, if no Telegram token is configured yet, Cognal prints a BotFather step-by-step guide in the terminal before asking for the token.
+
+BotFather quick path:
+
+1. Open Telegram chat with [@BotFather](https://t.me/BotFather)
+2. `/start`
+3. `/newbot`
+4. Set bot name + unique username ending in `bot`
+5. Copy token (`123456789:AA...`) and paste into setup prompt
+
 Setup options:
 
 ```bash
