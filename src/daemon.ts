@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { promises as fs, constants as fsConstants } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { loadOrCreateConfig, getRuntimePaths, ensureRuntimeDirs, getDefaultAgent, getEnabledAgents, isAgentEnabled } from "./config.js";
@@ -16,6 +17,72 @@ import { AgentManager } from "./agents/manager.js";
 import type { AgentType, InboundAttachment } from "./types.js";
 
 const logger = new Logger("daemon");
+
+interface BotLock {
+  lockPath: string;
+}
+
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function acquireBotLock(botId: number, projectRoot: string): Promise<BotLock> {
+  const lockPath = path.join(os.tmpdir(), `cognal-telegram-bot-${botId}.lock`);
+  const payload = JSON.stringify({ pid: process.pid, projectRoot, ts: new Date().toISOString() });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await fs.writeFile(lockPath, payload, { flag: "wx", mode: 0o600 });
+      return { lockPath };
+    } catch (err: unknown) {
+      if (!(err instanceof Error) || !String(err.message).includes("EEXIST")) {
+        throw err;
+      }
+
+      let existingPid = -1;
+      let existingProjectRoot = "unknown";
+      try {
+        const raw = await fs.readFile(lockPath, "utf8");
+        const parsed = JSON.parse(raw) as { pid?: number; projectRoot?: string };
+        existingPid = Number(parsed.pid ?? -1);
+        if (parsed.projectRoot) {
+          existingProjectRoot = parsed.projectRoot;
+        }
+      } catch {
+        // ignore lock parse errors
+      }
+
+      if (isPidAlive(existingPid)) {
+        throw new Error(
+          `Another cognald instance is already polling this Telegram bot (pid=${existingPid}, projectRoot=${existingProjectRoot}). Stop it before starting this instance.`
+        );
+      }
+
+      await fs.rm(lockPath, { force: true });
+    }
+  }
+
+  throw new Error(`Failed to acquire bot lock at ${lockPath}`);
+}
+
+async function releaseBotLock(lock: BotLock | null): Promise<void> {
+  if (!lock) {
+    return;
+  }
+  try {
+    await fs.rm(lock.lockPath, { force: true });
+  } catch {
+    // ignore cleanup failures
+  }
+}
 
 async function isExecutable(filePath: string): Promise<boolean> {
   try {
@@ -64,6 +131,7 @@ async function main(): Promise<void> {
 
   const chat = new TelegramBotAdapter(telegramToken, paths.telegramOffsetPath, cfg.telegram.botUsername);
   const identity = await chat.getIdentity();
+  const botLock = await acquireBotLock(identity.id, projectRoot);
   const openAiKey = process.env[cfg.stt.apiKeyEnv];
   const stt = openAiKey ? new SttAdapter(openAiKey) : null;
 
@@ -104,6 +172,7 @@ async function main(): Promise<void> {
     running = false;
     logger.info("shutdown requested");
     await manager.shutdownAll();
+    await releaseBotLock(botLock);
     await db.close();
     process.exit(0);
   };
