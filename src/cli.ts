@@ -6,7 +6,6 @@ import path from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import QRCode from "qrcode";
 import {
   loadOrCreateConfig,
   getRuntimePaths,
@@ -17,16 +16,14 @@ import {
   getDefaultAgent,
   isAgentEnabled
 } from "./config.js";
-import { Db } from "./core/db.js";
-import { commandExists, runCommand, runInteractiveCommand, safeFileName } from "./core/utils.js";
-import { Logger } from "./core/logger.js";
-import type { HealthCheckResult } from "./types.js";
 import type { CognalConfig, ProviderSelection } from "./config.js";
-import { SignalCliAdapter } from "./adapters/signalCliAdapter.js";
-import { DeliveryAdapter } from "./adapters/deliveryAdapter.js";
+import { Db } from "./core/db.js";
+import { commandExists, runCommand, runInteractiveCommand } from "./core/utils.js";
+import { Logger } from "./core/logger.js";
+import type { AllowedChatRecord, HealthCheckResult } from "./types.js";
+import { TelegramBotAdapter } from "./adapters/telegramBotAdapter.js";
 
 const logger = new Logger("cli");
-const MAX_LINK_ATTEMPTS = 3;
 const CLI_ENTRYPOINT_PATH = fileURLToPath(import.meta.url);
 const DIST_DIR = path.dirname(CLI_ENTRYPOINT_PATH);
 const DAEMON_ENTRYPOINT_PATH = path.join(DIST_DIR, "daemon.js");
@@ -56,11 +53,7 @@ async function promptProviderSelection(defaultSelection: ProviderSelection): Pro
     return defaultSelection;
   }
 
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
-
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     process.stdout.write("Choose provider mode:\n");
     process.stdout.write("  1) codex\n");
@@ -89,10 +82,7 @@ async function promptYesNo(question: string, defaultYes: boolean): Promise<boole
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     return defaultYes;
   }
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     const suffix = defaultYes ? "[Y/n]" : "[y/N]";
     const answer = (await rl.question(`${question} ${suffix}: `)).trim().toLowerCase();
@@ -115,17 +105,11 @@ async function promptText(question: string, defaultValue = ""): Promise<string> 
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     return defaultValue;
   }
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     const suffix = defaultValue ? ` [${defaultValue}]` : "";
     const answer = (await rl.question(`${question}${suffix}: `)).trim();
-    if (!answer) {
-      return defaultValue;
-    }
-    return answer;
+    return answer || defaultValue;
   } finally {
     rl.close();
   }
@@ -135,28 +119,27 @@ function resolveProjectRoot(input?: string): string {
   return input ? path.resolve(input) : process.cwd();
 }
 
-function validatePhone(phone: string): void {
-  if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
-    throw new Error(`Invalid E.164 phone number: ${phone}`);
+function validateTelegramUserId(value: string): string {
+  const trimmed = value.trim();
+  if (!/^\d{5,20}$/.test(trimmed)) {
+    throw new Error(`Invalid telegram user ID: ${value}`);
   }
+  return trimmed;
 }
 
-function makeRecordEmail(phone: string): string {
-  return `no-email+${phone.replace(/\D/g, "")}@local.invalid`;
+function validateChatId(value: string): string {
+  const trimmed = value.trim();
+  if (!/^-?\d{5,20}$/.test(trimmed)) {
+    throw new Error(`Invalid chat ID: ${value}`);
+  }
+  return trimmed;
 }
 
-function signalCliInstallHint(): string {
-  return [
-    "signal-cli is not installed or not in PATH.",
-    "Re-run the Cognal one-line installer; it now auto-installs java + signal-cli on Ubuntu/Debian.",
-    "Or install signal-cli manually from https://github.com/AsamK/signal-cli/releases/latest",
-    "and make sure `signal-cli` is available in PATH.",
-    "Then verify with: signal-cli --version"
-  ].join("\n");
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+function parseCsv(input: string): string[] {
+  return input
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
 }
 
 function parseEnvFile(raw: string): Record<string, string> {
@@ -187,22 +170,18 @@ function envValueForFile(value: string): string {
   if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) {
     return value;
   }
-  return shellQuote(value);
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-async function upsertDaemonEnv(envPath: string, updates: Record<string, string>): Promise<void> {
-  let env: Record<string, string> = {};
+async function readDaemonEnv(envPath: string): Promise<Record<string, string>> {
   try {
-    env = parseEnvFile(await fs.readFile(envPath, "utf8"));
+    return parseEnvFile(await fs.readFile(envPath, "utf8"));
   } catch {
-    env = {};
+    return {};
   }
-  for (const [key, value] of Object.entries(updates)) {
-    if (!value) {
-      continue;
-    }
-    env[key] = value;
-  }
+}
+
+async function writeDaemonEnv(envPath: string, env: Record<string, string>): Promise<void> {
   const lines = Object.entries(env)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, value]) => `${key}=${envValueForFile(value)}`);
@@ -210,8 +189,27 @@ async function upsertDaemonEnv(envPath: string, updates: Record<string, string>)
   try {
     await fs.chmod(envPath, 0o600);
   } catch {
-    // best-effort hardening for local secret file permissions
+    // best effort
   }
+}
+
+async function upsertDaemonEnv(envPath: string, updates: Record<string, string>): Promise<void> {
+  const env = await readDaemonEnv(envPath);
+  for (const [key, value] of Object.entries(updates)) {
+    if (!value) {
+      continue;
+    }
+    env[key] = value;
+  }
+  await writeDaemonEnv(envPath, env);
+}
+
+async function removeDaemonEnvKeys(envPath: string, keys: string[]): Promise<void> {
+  const env = await readDaemonEnv(envPath);
+  for (const key of keys) {
+    delete env[key];
+  }
+  await writeDaemonEnv(envPath, env);
 }
 
 function parseProviderAuthMode(value: string): ProviderAuthMode {
@@ -231,8 +229,8 @@ async function promptProviderAuthMode(spec: ProviderRuntimeSpec): Promise<Provid
   }
 
   process.stdout.write(`Choose ${spec.label} auth mode:\n`);
-  process.stdout.write(`  1) api_key (recommended for servers)\n`);
-  process.stdout.write(`  2) auth_login (browser OAuth)\n`);
+  process.stdout.write("  1) api_key (recommended for servers)\n");
+  process.stdout.write("  2) auth_login (browser OAuth)\n");
   const answer = await promptText(`Auth mode for ${spec.label} [api_key]`);
   if (!answer.trim()) {
     return "api_key";
@@ -268,11 +266,7 @@ async function getConfigAndDb(projectRoot: string): Promise<{
   return { db, paths, cfg };
 }
 
-async function installSystemdUnit(
-  projectRoot: string,
-  cfg: CognalConfig,
-  extraEnv: Record<string, string> = {}
-): Promise<void> {
+async function installSystemdUnit(projectRoot: string, cfg: CognalConfig, extraEnv: Record<string, string> = {}): Promise<void> {
   const serviceName = cfg.runtime.serviceName;
   const runUser = process.env.SUDO_USER || process.env.USER || "root";
   const unit = `[Unit]
@@ -324,6 +318,7 @@ WantedBy=multi-user.target
     });
     return;
   }
+
   logger.info("systemd unit installed", { service: serviceName });
 }
 
@@ -348,48 +343,6 @@ async function uninstallSystemdUnit(cfg: CognalConfig): Promise<void> {
     return;
   }
   process.stdout.write(`Removed service ${serviceName}\n`);
-}
-
-async function runSetupOnboarding(projectRoot: string): Promise<void> {
-  const { cfg } = await loadProjectConfig(projectRoot);
-  if (!(await commandExists(cfg.signal.command))) {
-    process.stdout.write("[WARN] signal-cli not found. Skipping interactive user onboarding.\n");
-    process.stdout.write(`${signalCliInstallHint()}\n`);
-    return;
-  }
-
-  const addNow = await promptYesNo("Add allowed Signal users now?", false);
-  if (!addNow) {
-    return;
-  }
-
-  process.stdout.write("Example phone format: +4915123456789\n");
-  process.stdout.write("QR delivery mode is fixed to: public_encrypted (public link + separate password)\n");
-
-  while (true) {
-    const phone = await promptText("Signal phone in E.164 (example: +4915123456789, empty to finish)");
-    if (!phone.trim()) {
-      break;
-    }
-    const normalizedPhone = phone.trim();
-    try {
-      validatePhone(normalizedPhone);
-    } catch {
-      process.stdout.write(`Invalid phone format: ${normalizedPhone}\n`);
-      continue;
-    }
-
-    try {
-      await userAddAction(normalizedPhone, projectRoot);
-    } catch (err) {
-      process.stdout.write(`Failed to add user ${normalizedPhone}: ${String(err)}\n`);
-    }
-
-    const addAnother = await promptYesNo("Add another user?", true);
-    if (!addAnother) {
-      break;
-    }
-  }
 }
 
 function enabledProviderSpecs(cfg: CognalConfig): ProviderRuntimeSpec[] {
@@ -429,6 +382,10 @@ async function installProviderCli(spec: ProviderRuntimeSpec): Promise<void> {
   }
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 async function runProviderSetupWithArgs(command: string, args: string[]): Promise<void> {
   const fullCommand = [command, ...args].map(shellQuote).join(" ");
   const code = await runInteractiveCommand("bash", ["-lc", fullCommand]);
@@ -437,22 +394,52 @@ async function runProviderSetupWithArgs(command: string, args: string[]): Promis
   }
 }
 
+async function runSetupOnboarding(projectRoot: string, cfg: CognalConfig): Promise<void> {
+  const { db } = await openDb(projectRoot);
+  try {
+    const addNow = await promptYesNo("Add initial allowed Telegram users/chats now?", false);
+    if (!addNow) {
+      return;
+    }
+
+    process.stdout.write("Telegram user ID example: 123456789\n");
+    const usersRaw = await promptText("Allowed Telegram user IDs (comma-separated, empty to skip)");
+    for (const rawId of parseCsv(usersRaw)) {
+      const userId = validateTelegramUserId(rawId);
+      await db.addOrUpdateTelegramUser(userId, {
+        status: "active",
+        defaultActiveAgent: getDefaultAgent(cfg)
+      });
+      process.stdout.write(`Allowed user: ${userId}\n`);
+    }
+
+    if (cfg.telegram.allowGroups) {
+      process.stdout.write("Telegram group chat ID example: -1001234567890\n");
+      const chatsRaw = await promptText("Allowed group/supergroup chat IDs (comma-separated, empty to skip)");
+      for (const rawChat of parseCsv(chatsRaw)) {
+        const chatId = validateChatId(rawChat);
+        await db.allowChat(chatId, "supergroup", null);
+        process.stdout.write(`Allowed chat: ${chatId}\n`);
+      }
+    }
+  } finally {
+    await db.close();
+  }
+}
+
 async function doctorChecks(projectRoot: string, cfg: CognalConfig): Promise<HealthCheckResult[]> {
   const checks: HealthCheckResult[] = [];
-  const binaries = ["node", "npm", "java", "systemctl", "signal-cli"];
+  const binaries = ["node", "npm", "systemctl"];
   if (cfg.agents.enabled.claude) {
     binaries.push("claude");
   }
   if (cfg.agents.enabled.codex) {
     binaries.push("codex");
   }
+
   for (const bin of binaries) {
     const ok = await commandExists(bin);
-    checks.push({
-      name: `binary:${bin}`,
-      ok,
-      details: ok ? "ok" : "missing"
-    });
+    checks.push({ name: `binary:${bin}`, ok, details: ok ? "ok" : "missing" });
   }
 
   const distro = await runCommand("bash", ["-lc", "source /etc/os-release && echo ${ID:-unknown}"], { timeoutMs: 2_000 });
@@ -463,12 +450,33 @@ async function doctorChecks(projectRoot: string, cfg: CognalConfig): Promise<Hea
     details: distroId || "unknown"
   });
 
-  const cfgPath = getRuntimePaths(projectRoot).configPath;
+  const paths = getRuntimePaths(projectRoot);
   try {
-    await fs.access(cfgPath);
-    checks.push({ name: "config", ok: true, details: cfgPath });
+    await fs.access(paths.configPath);
+    checks.push({ name: "config", ok: true, details: paths.configPath });
   } catch {
     checks.push({ name: "config", ok: false, details: "missing config.toml" });
+  }
+
+  const envPath = path.join(paths.cognalDir, "cognald.env");
+  const daemonEnv = await readDaemonEnv(envPath);
+  const botToken = daemonEnv[cfg.telegram.botTokenEnv] || process.env[cfg.telegram.botTokenEnv] || "";
+  checks.push({
+    name: `env:${cfg.telegram.botTokenEnv}`,
+    ok: Boolean(botToken),
+    details: botToken ? "set" : "missing"
+  });
+
+  if (botToken) {
+    try {
+      const adapter = new TelegramBotAdapter(botToken, paths.telegramOffsetPath, cfg.telegram.botUsername);
+      const me = await adapter.getIdentity();
+      checks.push({ name: "telegram:getMe", ok: true, details: `@${me.username}` });
+    } catch (err) {
+      checks.push({ name: "telegram:getMe", ok: false, details: String(err) });
+    }
+  } else {
+    checks.push({ name: "telegram:getMe", ok: false, details: "skipped (missing token)" });
   }
 
   const serviceName = cfg.runtime.serviceName;
@@ -489,100 +497,11 @@ async function doctorChecks(projectRoot: string, cfg: CognalConfig): Promise<Hea
   return checks;
 }
 
-function createDeliveryAdapterFromEnv(cfg: Awaited<ReturnType<typeof loadOrCreateConfig>>): DeliveryAdapter {
-  const resendApiKey = process.env[cfg.delivery.resend.apiKeyEnv];
-  const storage = cfg.delivery.storage;
-  const publicDump = cfg.delivery.publicDump;
-  return new DeliveryAdapter({
-    resendApiKey,
-    resendFrom: cfg.delivery.resend.from,
-    storage: {
-      endpoint: storage.endpoint,
-      region: storage.region,
-      bucket: storage.bucket,
-      accessKey: storage.accessKeyEnv ? process.env[storage.accessKeyEnv] : undefined,
-      secretKey: storage.secretKeyEnv ? process.env[storage.secretKeyEnv] : undefined,
-      ttlSec: storage.presignedTtlSec
-    },
-    publicDump: {
-      endpoint: process.env.COGNAL_PUBLIC_DUMP_ENDPOINT || publicDump.endpoint,
-      fileField: publicDump.fileField,
-      timeoutSec: publicDump.timeoutSec,
-      extraFields: publicDump.extraFields
-    }
-  });
-}
-
-async function deliverQr(pngPath: string, deliveryAdapter: DeliveryAdapter) {
-  return await deliveryAdapter.deliverQrByPublicEncrypted(pngPath, { allowLocalFallback: false });
-}
-
-async function createQrPng(uri: string, linksDir: string, baseName: string): Promise<string> {
-  const filePath = path.join(linksDir, `${safeFileName(baseName)}.png`);
-  await QRCode.toFile(filePath, uri, {
-    type: "png",
-    errorCorrectionLevel: "H",
-    margin: 1,
-    width: 512
-  });
-  return filePath;
-}
-
-function isRetriableLinkError(err: unknown): boolean {
-  const message = String(err);
-  return /Connection closed!/i.test(message) || /exit 3/i.test(message) || /Timed out/i.test(message);
-}
-
-async function runLinkDeliveryFlow(
-  params: {
-    db: Db;
-    userId: string;
-    phone: string;
-    paths: ReturnType<typeof getRuntimePaths>;
-    signal: SignalCliAdapter;
-    delivery: DeliveryAdapter;
-  }
-): Promise<void> {
-  for (let attempt = 1; attempt <= MAX_LINK_ATTEMPTS; attempt += 1) {
-    const linkSession = await params.signal.createDeviceLinkSession(`cognal-${params.phone}`);
-    const pngPath = await createQrPng(linkSession.uri, params.paths.linksDir, `${params.phone}-${Date.now()}-a${attempt}`);
-    const result = await deliverQr(pngPath, params.delivery);
-
-    await params.db.recordDelivery(params.userId, result.mode, result.target, null, result.expiresAt ?? null);
-
-    process.stdout.write(`QR delivery mode: ${result.mode}\n`);
-    process.stdout.write(`Target: ${result.target}\n`);
-    if (result.expiresAt) {
-      process.stdout.write(`Expires at: ${result.expiresAt}\n`);
-    }
-    if (result.secret) {
-      process.stdout.write(`Password: ${result.secret}\n`);
-      process.stdout.write("Share link and password separately.\n");
-    }
-    process.stdout.write(`Link attempt ${attempt}/${MAX_LINK_ATTEMPTS}. QR is valid only briefly (~60s).\n`);
-    process.stdout.write("Waiting for Signal device-link confirmation. Keep this command running until completion.\n");
-
-    try {
-      await linkSession.completion;
-      process.stdout.write("Signal device-link completed.\n");
-      return;
-    } catch (err) {
-      if (attempt < MAX_LINK_ATTEMPTS && isRetriableLinkError(err)) {
-        process.stdout.write("Signal link window closed before completion. Generating a fresh QR...\n");
-        continue;
-      }
-      throw err;
-    }
-  }
-
-  throw new Error("Signal device-link failed after maximum retry attempts.");
-}
-
 const program = new Command();
 
 program
   .name("cognal")
-  .description("Signal bridge for Claude Code and Codex")
+  .description("Telegram bridge for Claude Code and Codex")
   .option("-p, --project-root <path>", "Project root path")
   .showHelpAfterError();
 
@@ -593,22 +512,43 @@ program
   .option("--skip-provider-setup", "Skip native provider login/setup flows", false)
   .option("--distro <ubuntu|debian>", "Set distro in config")
   .option("--providers <claude|codex|both>", "Enabled providers")
-  .option("--skip-onboarding", "Skip interactive user onboarding", false)
+  .option("--skip-onboarding", "Skip interactive onboarding", false)
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
     const { db, paths, cfg } = await getConfigAndDb(projectRoot);
 
     const defaultProviders = providerSelectionFromEnabled(cfg.agents.enabled);
-    const selectedProviders = opts.providers
-      ? parseProviderSelection(opts.providers)
-      : await promptProviderSelection(defaultProviders);
+    const selectedProviders = opts.providers ? parseProviderSelection(opts.providers) : await promptProviderSelection(defaultProviders);
     cfg.agents.enabled = enabledFromProviderSelection(selectedProviders);
 
     if (opts.distro) {
       cfg.runtime.distro = opts.distro;
     }
+
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      cfg.telegram.allowGroups = await promptYesNo("Enable Telegram group/supergroup chats?", true);
+    }
+
+    const envPath = path.join(paths.cognalDir, "cognald.env");
+    const daemonEnv = await readDaemonEnv(envPath);
+    const currentToken = daemonEnv[cfg.telegram.botTokenEnv] || process.env[cfg.telegram.botTokenEnv] || "";
+    const tokenPrompt = currentToken ? `${cfg.telegram.botTokenEnv} (leave empty to keep current)` : `${cfg.telegram.botTokenEnv}`;
+    const enteredToken = (await promptText(`Telegram bot token ${tokenPrompt}`)).trim();
+    const finalToken = enteredToken || currentToken;
+    if (!finalToken) {
+      await db.close();
+      throw new Error(`Missing Telegram bot token (${cfg.telegram.botTokenEnv})`);
+    }
+
+    const telegram = new TelegramBotAdapter(finalToken, paths.telegramOffsetPath, cfg.telegram.botUsername);
+    const identity = await telegram.getIdentity();
+    cfg.telegram.botUsername = identity.username;
+
     await saveConfig(paths, cfg);
+    await upsertDaemonEnv(envPath, { [cfg.telegram.botTokenEnv]: finalToken, COGNAL_PROJECT_ROOT: projectRoot });
+
     process.stdout.write(`Provider mode: ${selectedProviders}\n`);
+    process.stdout.write(`Telegram bot: @${identity.username}\n`);
 
     const checks = await doctorChecks(projectRoot, cfg);
     for (const check of checks) {
@@ -617,17 +557,21 @@ program
 
     const providerSpecs = enabledProviderSpecs(cfg);
     const providerAuthModes = new Map<string, ProviderAuthMode>();
-    const daemonEnvUpdates: Record<string, string> = {};
+    const daemonEnvUpdates: Record<string, string> = {
+      [cfg.telegram.botTokenEnv]: finalToken
+    };
+
+    if (!opts.skipOnboarding) {
+      await runSetupOnboarding(projectRoot, cfg);
+    }
 
     if (!opts.skipProviderInstall) {
       for (const spec of providerSpecs) {
         const exists = await commandExists(spec.command);
-        if (exists) {
-          continue;
+        if (!exists) {
+          await installProviderCli(spec);
+          process.stdout.write(`[OK] ${spec.label} CLI installed.\n`);
         }
-        process.stdout.write(`${spec.label} CLI is missing. Installing automatically...\n`);
-        await installProviderCli(spec);
-        process.stdout.write(`[OK] ${spec.label} CLI installed.\n`);
       }
     }
 
@@ -638,16 +582,9 @@ program
       } else {
         shouldRunProviderSetup = process.stdin.isTTY && process.stdout.isTTY;
         if (!shouldRunProviderSetup) {
-          process.stdout.write(
-            "[WARN] Non-interactive shell detected. Skipping native provider setup/login. Use --run-provider-setup to force.\n"
-          );
+          process.stdout.write("[WARN] Non-interactive shell detected. Skipping native provider setup/login. Use --run-provider-setup to force.\n");
         }
       }
-    }
-
-    await db.close();
-    if (!opts.skipOnboarding) {
-      await runSetupOnboarding(projectRoot);
     }
 
     if (shouldRunProviderSetup) {
@@ -657,21 +594,14 @@ program
 
         if (authMode !== "api_key") {
           if (spec.label === "Claude" && (process.env.SSH_CONNECTION || process.env.SSH_CLIENT || process.env.SSH_TTY)) {
-            process.stdout.write(
-              "[WARN] Claude auth_login on SSH/headless hosts may hang after browser auth because the localhost callback cannot complete reliably.\n"
-            );
-            process.stdout.write(
-              "[WARN] If login does not complete, re-run setup and choose api_key instead.\n"
-            );
+            process.stdout.write("[WARN] Claude auth_login on SSH/headless hosts may hang after browser auth; api_key is more reliable.\n");
           }
           continue;
         }
 
         process.stdout.write(`${spec.label} API key URL: ${spec.apiKeyUrl}\n`);
         const existing = process.env[spec.apiKeyEnv]?.trim() ?? "";
-        const keyPrompt = existing
-          ? `Paste ${spec.apiKeyEnv} (leave empty to keep current value)`
-          : `Paste ${spec.apiKeyEnv}`;
+        const keyPrompt = existing ? `Paste ${spec.apiKeyEnv} (leave empty to keep current value)` : `Paste ${spec.apiKeyEnv}`;
         const entered = (await promptText(keyPrompt)).trim();
         const finalKey = entered || existing;
         if (!finalKey) {
@@ -693,24 +623,18 @@ program
         }
 
         const authMode = providerAuthModes.get(spec.command) ?? (process.env[spec.apiKeyEnv]?.trim() ? "api_key" : "auth_login");
-        if (authMode === "api_key") {
-          if (process.env[spec.apiKeyEnv]?.trim()) {
-            process.stdout.write(`[OK] Using ${spec.apiKeyEnv} for ${spec.label}. Skipping auth login.\n`);
-            continue;
-          }
-          process.stdout.write(`[WARN] ${spec.apiKeyEnv} missing. Falling back to native ${spec.label} auth login.\n`);
-        }
-
-        if (process.env[spec.apiKeyEnv]?.trim() && !providerAuthModes.has(spec.command)) {
-          process.stdout.write(`[OK] ${spec.apiKeyEnv} detected. Skipping native ${spec.label} login.\n`);
+        if (authMode === "api_key" && process.env[spec.apiKeyEnv]?.trim()) {
+          process.stdout.write(`[OK] Using ${spec.apiKeyEnv} for ${spec.label}. Skipping auth login.\n`);
           continue;
         }
+
         process.stdout.write(`Running native ${spec.label} setup...\n`);
         await runProviderSetupWithArgs(spec.command, spec.setupArgs);
       }
     }
 
     await installSystemdUnit(projectRoot, cfg, daemonEnvUpdates);
+    await db.close();
     process.stdout.write("Setup complete. Run 'cognal doctor' for final verification.\n");
   });
 
@@ -765,45 +689,27 @@ program
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
     const { cfg } = await loadProjectConfig(projectRoot);
-    const args = opts.follow
-      ? ["-u", cfg.runtime.serviceName, "-f"]
-      : ["-u", cfg.runtime.serviceName, "-n", "200"];
+    const args = opts.follow ? ["-u", cfg.runtime.serviceName, "-f"] : ["-u", cfg.runtime.serviceName, "-n", "200"];
     const proc = spawn("journalctl", args, { stdio: "inherit" });
     await new Promise<void>((resolve) => {
       proc.on("exit", () => resolve());
     });
   });
 
-async function userAddAction(phone: string, projectRoot: string): Promise<void> {
-  validatePhone(phone);
-  const { db, paths, cfg } = await getConfigAndDb(projectRoot);
+async function userAddAction(telegramUserIdRaw: string, projectRoot: string, username?: string): Promise<void> {
+  const telegramUserId = validateTelegramUserId(telegramUserIdRaw);
+  const { db, cfg } = await getConfigAndDb(projectRoot);
   try {
-    if (!(await commandExists(cfg.signal.command))) {
-      throw new Error(signalCliInstallHint());
-    }
-    const recordEmail = makeRecordEmail(phone);
-
-    let user = await db.getUserByPhone(phone);
-    if (!user) {
-      user = await db.addUser(phone, recordEmail, getDefaultAgent(cfg));
-    } else {
-      const binding = await db.getBinding(user.id, getDefaultAgent(cfg));
-      if (!isAgentEnabled(cfg, binding.activeAgent)) {
-        await db.setActiveAgent(user.id, getDefaultAgent(cfg));
-      }
-    }
-
-    process.stdout.write(`User registered in pending state: ${phone}\n`);
-    const signal = new SignalCliAdapter(cfg.signal.command, cfg.signal.dataDir, cfg.signal.account);
-    const deliveryAdapter = createDeliveryAdapterFromEnv(cfg);
-    await runLinkDeliveryFlow({
-      db,
-      userId: user.id,
-      phone,
-      paths,
-      signal,
-      delivery: deliveryAdapter
+    const user = await db.addOrUpdateTelegramUser(telegramUserId, {
+      username: username ?? null,
+      status: "active",
+      defaultActiveAgent: getDefaultAgent(cfg)
     });
+    const binding = await db.getBinding(user.id, getDefaultAgent(cfg));
+    if (!isAgentEnabled(cfg, binding.activeAgent)) {
+      await db.setActiveAgent(user.id, getDefaultAgent(cfg));
+    }
+    process.stdout.write(`Allowed Telegram user ${telegramUserId}\n`);
   } finally {
     await db.close();
   }
@@ -811,252 +717,334 @@ async function userAddAction(phone: string, projectRoot: string): Promise<void> 
 
 async function userListAction(projectRoot: string): Promise<void> {
   const { db } = await getConfigAndDb(projectRoot);
-  const users = await db.listUsers();
-  await db.close();
-  const rows = users.map((u) => ({
-    id: u.id,
-    phone: u.phoneE164,
-    status: u.status,
-    signalAccountId: u.signalAccountId ?? "-",
-    createdAt: u.createdAt
-  }));
-  console.table(rows);
-}
-
-async function userRevokeAction(phone: string, projectRoot: string): Promise<void> {
-  validatePhone(phone);
-  const { db } = await getConfigAndDb(projectRoot);
-  const user = await db.getUserByPhone(phone);
-  if (!user) {
-    throw new Error(`Unknown user: ${phone}`);
-  }
-  await db.setUserStatus(user.id, "revoked");
-  await db.close();
-  process.stdout.write(`Revoked user ${phone}\n`);
-}
-
-async function userRelinkAction(phone: string, projectRoot: string): Promise<void> {
-  validatePhone(phone);
-  const { db, paths, cfg } = await getConfigAndDb(projectRoot);
   try {
-    if (!(await commandExists(cfg.signal.command))) {
-      throw new Error(signalCliInstallHint());
-    }
-    const user = await db.getUserByPhone(phone);
-    if (!user) {
-      throw new Error(`Unknown user: ${phone}`);
-    }
-    const binding = await db.getBinding(user.id, getDefaultAgent(cfg));
-    if (!isAgentEnabled(cfg, binding.activeAgent)) {
-      await db.setActiveAgent(user.id, getDefaultAgent(cfg));
-    }
+    const users = await db.listUsers();
+    const rows = users.map((u) => ({
+      id: u.id,
+      telegramUserId: u.telegramUserId ?? "-",
+      telegramUsername: u.telegramUsername ?? "-",
+      displayName: u.displayName ?? "-",
+      status: u.status,
+      lastSeenAt: u.lastSeenAt ?? "-",
+      createdAt: u.createdAt
+    }));
+    console.table(rows);
+  } finally {
+    await db.close();
+  }
+}
 
-    await db.setUserStatus(user.id, "pending");
-    process.stdout.write(`Relink generated for ${phone}\n`);
+async function userRevokeAction(telegramUserIdRaw: string, projectRoot: string): Promise<void> {
+  const telegramUserId = validateTelegramUserId(telegramUserIdRaw);
+  const { db } = await getConfigAndDb(projectRoot);
+  try {
+    const changed = await db.revokeByTelegramUserId(telegramUserId);
+    if (!changed) {
+      throw new Error(`Unknown Telegram user ID: ${telegramUserId}`);
+    }
+    process.stdout.write(`Revoked Telegram user ${telegramUserId}\n`);
+  } finally {
+    await db.close();
+  }
+}
 
-    const signal = new SignalCliAdapter(cfg.signal.command, cfg.signal.dataDir, cfg.signal.account);
-    const delivery = createDeliveryAdapterFromEnv(cfg);
-    await runLinkDeliveryFlow({
-      db,
-      userId: user.id,
-      phone,
-      paths,
-      signal,
-      delivery
-    });
+async function userRequestsAction(projectRoot: string): Promise<void> {
+  const { db } = await getConfigAndDb(projectRoot);
+  try {
+    const requests = await db.listAccessRequests("pending");
+    const rows = requests.map((r) => ({
+      telegramUserId: r.telegramUserId,
+      chatId: r.chatId,
+      username: r.username ?? "-",
+      displayName: r.displayName ?? "-",
+      firstSeenAt: r.firstSeenAt,
+      lastSeenAt: r.lastSeenAt,
+      status: r.status
+    }));
+    console.table(rows);
+  } finally {
+    await db.close();
+  }
+}
+
+async function userApproveAction(telegramUserIdRaw: string, projectRoot: string): Promise<void> {
+  const telegramUserId = validateTelegramUserId(telegramUserIdRaw);
+  const { db, cfg } = await getConfigAndDb(projectRoot);
+  try {
+    await db.approveAccessRequest(telegramUserId, getDefaultAgent(cfg));
+    process.stdout.write(`Approved Telegram user ${telegramUserId}\n`);
+  } finally {
+    await db.close();
+  }
+}
+
+async function chatAllowAction(chatIdRaw: string, projectRoot: string, type: AllowedChatRecord["chatType"], title?: string): Promise<void> {
+  const chatId = validateChatId(chatIdRaw);
+  const { db } = await getConfigAndDb(projectRoot);
+  try {
+    await db.allowChat(chatId, type, title ?? null);
+    process.stdout.write(`Allowed chat ${chatId} (${type})\n`);
+  } finally {
+    await db.close();
+  }
+}
+
+async function chatRevokeAction(chatIdRaw: string, projectRoot: string): Promise<void> {
+  const chatId = validateChatId(chatIdRaw);
+  const { db } = await getConfigAndDb(projectRoot);
+  try {
+    const changed = await db.revokeChat(chatId);
+    if (!changed) {
+      throw new Error(`Unknown chat ID: ${chatId}`);
+    }
+    process.stdout.write(`Revoked chat ${chatId}\n`);
+  } finally {
+    await db.close();
+  }
+}
+
+async function chatListAction(projectRoot: string): Promise<void> {
+  const { db } = await getConfigAndDb(projectRoot);
+  try {
+    const chats = await db.listAllowedChats();
+    console.table(
+      chats.map((chat) => ({
+        chatId: chat.chatId,
+        chatType: chat.chatType,
+        title: chat.title ?? "-",
+        createdAt: chat.createdAt
+      }))
+    );
   } finally {
     await db.close();
   }
 }
 
 const userCommand = program.command("user").description("User management");
-userCommand
-  .command("add")
-  .requiredOption("--phone <phone>", "Phone in E.164 format")
-  .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
-    await userAddAction(opts.phone, projectRoot);
-  });
 
 userCommand
-  .command("list")
-  .action(async (_, cmd) => {
+  .command("add")
+  .requiredOption("--telegram-user-id <id>", "Telegram user ID")
+  .option("--username <name>", "Telegram username")
+  .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
-    await userListAction(projectRoot);
+    await userAddAction(opts.telegramUserId, projectRoot, opts.username);
   });
+
+userCommand.command("list").action(async (_, cmd) => {
+  const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+  await userListAction(projectRoot);
+});
 
 userCommand
   .command("revoke")
-  .requiredOption("--phone <phone>", "Phone in E.164 format")
+  .requiredOption("--telegram-user-id <id>", "Telegram user ID")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
-    await userRevokeAction(opts.phone, projectRoot);
+    await userRevokeAction(opts.telegramUserId, projectRoot);
   });
+
+userCommand.command("requests").action(async (_, cmd) => {
+  const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+  await userRequestsAction(projectRoot);
+});
 
 userCommand
-  .command("relink")
-  .requiredOption("--phone <phone>", "Phone in E.164 format")
+  .command("approve")
+  .requiredOption("--telegram-user-id <id>", "Telegram user ID")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
-    await userRelinkAction(opts.phone, projectRoot);
+    await userApproveAction(opts.telegramUserId, projectRoot);
   });
 
+// Legacy aliases
 program
   .command("user:add")
-  .requiredOption("--phone <phone>", "Phone in E.164 format")
+  .requiredOption("--telegram-user-id <id>", "Telegram user ID")
+  .option("--username <name>", "Telegram username")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
-    await userAddAction(opts.phone, projectRoot);
+    await userAddAction(opts.telegramUserId, projectRoot, opts.username);
   });
 
-program
-  .command("user:list")
-  .action(async (_, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
-    await userListAction(projectRoot);
-  });
+program.command("user:list").action(async (_, cmd) => {
+  const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+  await userListAction(projectRoot);
+});
 
 program
   .command("user:revoke")
-  .requiredOption("--phone <phone>", "Phone in E.164 format")
+  .requiredOption("--telegram-user-id <id>", "Telegram user ID")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
-    await userRevokeAction(opts.phone, projectRoot);
+    await userRevokeAction(opts.telegramUserId, projectRoot);
   });
 
+program.command("user:requests").action(async (_, cmd) => {
+  const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+  await userRequestsAction(projectRoot);
+});
+
 program
-  .command("user:relink")
-  .requiredOption("--phone <phone>", "Phone in E.164 format")
+  .command("user:approve")
+  .requiredOption("--telegram-user-id <id>", "Telegram user ID")
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
-    await userRelinkAction(opts.phone, projectRoot);
+    await userApproveAction(opts.telegramUserId, projectRoot);
   });
+
+const chatCommand = program.command("chat").description("Telegram chat allow-list management");
+
+chatCommand
+  .command("allow")
+  .requiredOption("--chat-id <id>", "Telegram chat ID")
+  .option("--type <private|group|supergroup|channel>", "Chat type", "supergroup")
+  .option("--title <title>", "Optional chat title")
+  .action(async (opts, cmd) => {
+    const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+    const type = opts.type as AllowedChatRecord["chatType"];
+    if (!["private", "group", "supergroup", "channel"].includes(type)) {
+      throw new Error(`Invalid chat type: ${opts.type}`);
+    }
+    await chatAllowAction(opts.chatId, projectRoot, type, opts.title);
+  });
+
+chatCommand
+  .command("revoke")
+  .requiredOption("--chat-id <id>", "Telegram chat ID")
+  .action(async (opts, cmd) => {
+    const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+    await chatRevokeAction(opts.chatId, projectRoot);
+  });
+
+chatCommand.command("list").action(async (_, cmd) => {
+  const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+  await chatListAction(projectRoot);
+});
 
 program
   .command("doctor")
   .action(async (_, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
-    const paths = getRuntimePaths(projectRoot);
-    await ensureRuntimeDirs(paths);
-    const cfg = await loadOrCreateConfig(paths);
+    const { cfg } = await loadProjectConfig(projectRoot);
     const checks = await doctorChecks(projectRoot, cfg);
-    let hasFail = false;
     for (const check of checks) {
       process.stdout.write(`${check.ok ? "[OK]" : "[WARN]"} ${check.name}: ${check.details}\n`);
-      if (!check.ok) {
-        hasFail = true;
-      }
-    }
-    if (hasFail) {
-      process.exitCode = 1;
     }
   });
 
 program
   .command("update")
-  .action(async (_, cmd) => {
+  .action(async (__, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
-    const paths = getRuntimePaths(projectRoot);
-    await ensureRuntimeDirs(paths);
-    const cfg = await loadOrCreateConfig(paths);
+    const { cfg } = await loadProjectConfig(projectRoot);
+
     const steps: Array<{ title: string; command: string }> = [
-      { title: "Update Cognal repository", command: `cd '${INSTALL_ROOT}' && git fetch --all && git pull --ff-only` }
+      { title: "Update Cognal (git)", command: `cd '${INSTALL_ROOT}' && git fetch --all --tags && git pull --ff-only` },
+      { title: "Install dependencies", command: `cd '${INSTALL_ROOT}' && npm install` },
+      { title: "Build", command: `cd '${INSTALL_ROOT}' && npm run build` },
+      { title: "Relink", command: "npm link" }
     ];
+
     if (cfg.agents.enabled.claude) {
-      steps.push({ title: "Update Claude", command: "claude update" });
+      steps.push({ title: "Update Claude", command: "npm i -g @anthropic-ai/claude-code@latest" });
     }
     if (cfg.agents.enabled.codex) {
       steps.push({ title: "Update Codex", command: "npm i -g @openai/codex@latest" });
     }
+
     steps.push(
-      { title: "Update signal-cli", command: "sudo apt-get update && sudo apt-get install -y --only-upgrade signal-cli" },
-      { title: `Restart ${cfg.runtime.serviceName}`, command: `sudo systemctl restart ${cfg.runtime.serviceName}` },
-      { title: "Run doctor", command: `${process.execPath} '${CLI_ENTRYPOINT_PATH}' -p '${projectRoot}' doctor` }
+      { title: "Restart service", command: `sudo systemctl restart ${cfg.runtime.serviceName}` },
+      { title: "Doctor", command: `node '${path.join(INSTALL_ROOT, "dist/cli.js")}' -p '${projectRoot}' doctor` }
     );
 
     for (const step of steps) {
       process.stdout.write(`==> ${step.title}\n`);
-      const needsInteractive = /\bsudo\b/.test(step.command);
-      if (needsInteractive) {
-        const exitCode = await runInteractiveCommand("bash", ["-lc", step.command]);
-        if (exitCode !== 0) {
-          process.stdout.write(`[WARN] ${step.title} failed\n`);
-        } else {
-          process.stdout.write("[OK]\n");
-        }
-        continue;
-      }
-      const result = await runCommand("bash", ["-lc", step.command], { timeoutMs: 120_000 });
-      if (result.code !== 0) {
-        process.stdout.write(`[WARN] ${step.title} failed\n${result.stderr || result.stdout}\n`);
-      } else {
-        process.stdout.write("[OK]\n");
+      const code = await runInteractiveCommand("bash", ["-lc", step.command]);
+      if (code !== 0) {
+        throw new Error(`Update step failed: ${step.title}`);
       }
     }
+
+    process.stdout.write("Update complete.\n");
   });
 
 program
   .command("uninstall")
-  .description("Remove Cognal service and optionally workspace/global/provider installations")
-  .option("--yes", "Skip interactive prompts and use defaults", false)
-  .option("--remove-workspace", "Remove .cognal directory in project root", false)
+  .description("Remove Cognal service and optionally workspace/global/provider and telegram access state")
+  .option("--yes", "Skip confirmation prompts", false)
+  .option("--remove-workspace", "Remove project-local .cognal directory", false)
   .option("--remove-global", "Run npm unlink -g cognal", false)
   .option("--remove-claude-cli", "Run npm uninstall -g @anthropic-ai/claude-code", false)
   .option("--remove-codex-cli", "Run npm uninstall -g @openai/codex", false)
-  .option("--remove-providers", "Remove both provider CLIs (Claude + Codex)", false)
-  .option("--all", "Remove service, workspace, global Cognal link, and provider CLIs", false)
+  .option("--remove-providers", "Remove both provider CLIs", false)
+  .option("--remove-telegram-state", "Remove telegram token + chat/user allow data from workspace state", false)
+  .option("--all", "Remove service, workspace, global link, providers, and telegram state", false)
   .action(async (opts, cmd) => {
     const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
-    const { paths, cfg } = await loadProjectConfig(projectRoot);
-    const hasClaudeCli = await commandExists("claude");
-    const hasCodexCli = await commandExists("codex");
+    const { cfg, paths } = await loadProjectConfig(projectRoot);
 
-    const removeService = opts.all
-      ? true
-      : opts.yes
-      ? true
-      : await promptYesNo(`Remove systemd service '${cfg.runtime.serviceName}'?`, true);
-    const removeWorkspace = opts.all || opts.removeWorkspace
-      ? true
-      : opts.yes
-        ? false
-        : await promptYesNo(`Remove workspace state '${paths.cognalDir}'?`, false);
-    const removeGlobal = opts.all || opts.removeGlobal
-      ? true
-      : opts.yes
-        ? false
-        : await promptYesNo("Remove global CLI link (npm unlink -g cognal)?", false);
-    const removeClaudeCli = opts.all || opts.removeProviders || opts.removeClaudeCli
-      ? true
-      : opts.yes
-        ? false
-        : hasClaudeCli
-          ? await promptYesNo("Remove Claude CLI (npm uninstall -g @anthropic-ai/claude-code)?", false)
-          : false;
-    const removeCodexCli = opts.all || opts.removeProviders || opts.removeCodexCli
-      ? true
-      : opts.yes
-        ? false
-        : hasCodexCli
-          ? await promptYesNo("Remove Codex CLI (npm uninstall -g @openai/codex)?", false)
-          : false;
+    const hasClaude = await commandExists("claude");
+    const hasCodex = await commandExists("codex");
+
+    const removeService = true;
+    const removeWorkspace = opts.all || opts.removeWorkspace || (opts.yes ? false : await promptYesNo(`Remove workspace state '${paths.cognalDir}'?`, false));
+    const removeGlobal = opts.all || opts.removeGlobal || (opts.yes ? false : await promptYesNo("Remove global CLI link (npm unlink -g cognal)?", false));
+
+    const removeClaude =
+      opts.all ||
+      opts.removeProviders ||
+      opts.removeClaudeCli ||
+      (!opts.yes && hasClaude ? await promptYesNo("Remove Claude CLI (npm uninstall -g @anthropic-ai/claude-code)?", false) : false);
+
+    const removeCodex =
+      opts.all ||
+      opts.removeProviders ||
+      opts.removeCodexCli ||
+      (!opts.yes && hasCodex ? await promptYesNo("Remove Codex CLI (npm uninstall -g @openai/codex)?", false) : false);
+
+    const removeTelegramState =
+      opts.all ||
+      opts.removeTelegramState ||
+      (!opts.yes && !removeWorkspace ? await promptYesNo("Remove Telegram token + access allow-lists from workspace state?", false) : false);
 
     if (removeService) {
-      await uninstallSystemdUnit(cfg);
+      if (!opts.yes) {
+        const confirm = await promptYesNo(`Remove systemd service '${cfg.runtime.serviceName}'?`, true);
+        if (confirm) {
+          await uninstallSystemdUnit(cfg);
+        }
+      } else {
+        await uninstallSystemdUnit(cfg);
+      }
     }
+
+    if (removeTelegramState && !removeWorkspace) {
+      const { db } = await openDb(projectRoot);
+      await db.clearTelegramAccessState();
+      await db.close();
+      const envPath = path.join(paths.cognalDir, "cognald.env");
+      await removeDaemonEnvKeys(envPath, [cfg.telegram.botTokenEnv]);
+      cfg.telegram.botUsername = undefined;
+      await saveConfig(paths, cfg);
+      process.stdout.write("Removed Telegram token and access allow-lists from workspace state\n");
+    }
+
     if (removeWorkspace) {
       await fs.rm(paths.cognalDir, { recursive: true, force: true });
       process.stdout.write(`Removed ${paths.cognalDir}\n`);
     }
+
     if (removeGlobal) {
-      const code = await runInteractiveCommand("bash", ["-lc", "npm unlink -g cognal || true"]);
+      const code = await runInteractiveCommand("bash", ["-lc", "npm unlink -g cognal"]);
       if (code !== 0) {
-        process.stdout.write("Warning: global unlink may have failed\n");
+        process.stdout.write("Warning: npm unlink -g cognal returned non-zero\n");
       } else {
         process.stdout.write("Removed global cognal link\n");
       }
     }
-    if (removeClaudeCli) {
+
+    if (removeClaude) {
       const code = await runInteractiveCommand("bash", ["-lc", "npm uninstall -g @anthropic-ai/claude-code"]);
       if (code !== 0) {
         process.stdout.write("Warning: Claude CLI uninstall may have failed\n");
@@ -1064,7 +1052,8 @@ program
         process.stdout.write("Removed Claude CLI\n");
       }
     }
-    if (removeCodexCli) {
+
+    if (removeCodex) {
       const code = await runInteractiveCommand("bash", ["-lc", "npm uninstall -g @openai/codex"]);
       if (code !== 0) {
         process.stdout.write("Warning: Codex CLI uninstall may have failed\n");
@@ -1072,10 +1061,12 @@ program
         process.stdout.write("Removed Codex CLI\n");
       }
     }
+
     process.stdout.write("Uninstall complete.\n");
   });
 
 program.parseAsync(process.argv).catch((err) => {
+  logger.error("command failed", { error: String(err) });
   process.stderr.write(`Error: ${String(err)}\n`);
   process.exit(1);
 });

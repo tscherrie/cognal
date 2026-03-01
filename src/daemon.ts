@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import { promises as fs } from "node:fs";
+import path from "node:path";
 import process from "node:process";
 import { loadOrCreateConfig, getRuntimePaths, ensureRuntimeDirs, getDefaultAgent, getEnabledAgents, isAgentEnabled } from "./config.js";
 import { Db } from "./core/db.js";
 import { Logger } from "./core/logger.js";
 import { routeTextInput } from "./core/router.js";
-import { chunkText } from "./core/utils.js";
+import { chunkText, safeFileName } from "./core/utils.js";
 import { stageIncomingAttachment, buildAttachmentSummary } from "./core/attachments.js";
-import { SignalCliAdapter } from "./adapters/signalCliAdapter.js";
+import { TelegramBotAdapter } from "./adapters/telegramBotAdapter.js";
 import { SttAdapter } from "./adapters/sttAdapter.js";
 import { ClaudeAdapter } from "./agents/claudeAdapter.js";
 import { CodexAdapter } from "./agents/codexAdapter.js";
@@ -25,7 +26,13 @@ async function main(): Promise<void> {
   const db = new Db(paths.dbPath);
   await db.migrate();
 
-  const signal = new SignalCliAdapter(cfg.signal.command, cfg.signal.dataDir, cfg.signal.account);
+  const telegramToken = process.env[cfg.telegram.botTokenEnv]?.trim();
+  if (!telegramToken) {
+    throw new Error(`Missing Telegram bot token in env '${cfg.telegram.botTokenEnv}'`);
+  }
+
+  const chat = new TelegramBotAdapter(telegramToken, paths.telegramOffsetPath, cfg.telegram.botUsername);
+  const identity = await chat.getIdentity();
   const openAiKey = process.env[cfg.stt.apiKeyEnv];
   const stt = openAiKey ? new SttAdapter(openAiKey) : null;
 
@@ -33,6 +40,7 @@ async function main(): Promise<void> {
   if (enabledAgents.length === 0) {
     throw new Error("No agent provider is enabled. Update .cognal/config.toml.");
   }
+
   const adapters: Partial<Record<AgentType, ClaudeAdapter | CodexAdapter>> = {};
   if (cfg.agents.enabled.claude) {
     adapters.claude = new ClaudeAdapter(cfg.agents.claude.command, cfg.agents.claude.args);
@@ -41,16 +49,12 @@ async function main(): Promise<void> {
     adapters.codex = new CodexAdapter(cfg.agents.codex.command, cfg.agents.codex.args);
   }
 
-  const manager = new AgentManager(
-    db,
-    adapters,
-    {
-      failoverEnabled: cfg.routing.failoverEnabled && enabledAgents.length > 1,
-      agentResponseSec: cfg.timeouts.agentResponseSec,
-      agentIdleMs: cfg.timeouts.agentIdleMs,
-      defaultAgent: getDefaultAgent(cfg)
-    }
-  );
+  const manager = new AgentManager(db, adapters, {
+    failoverEnabled: cfg.routing.failoverEnabled && enabledAgents.length > 1,
+    agentResponseSec: cfg.timeouts.agentResponseSec,
+    agentIdleMs: cfg.timeouts.agentIdleMs,
+    defaultAgent: getDefaultAgent(cfg)
+  });
 
   let running = true;
   const stop = async (): Promise<void> => {
@@ -68,13 +72,13 @@ async function main(): Promise<void> {
     void stop();
   });
 
-  logger.info("cognald started", { projectRoot });
+  logger.info("cognald started", { projectRoot, botUsername: identity.username });
 
   while (running) {
     try {
-      const events = await signal.receive(cfg.signal.receiveTimeoutSec);
+      const events = await chat.receive(cfg.telegram.receiveTimeoutSec);
       for (const event of events) {
-        await processInboundEvent({ event, db, manager, signal, stt, cfg, paths });
+        await processInboundEvent({ event, db, manager, chat, stt, cfg, paths, botUsername: identity.username });
       }
       await runAttachmentCleanup(db);
     } catch (err) {
@@ -85,42 +89,55 @@ async function main(): Promise<void> {
 }
 
 async function processInboundEvent(args: {
-  event: Awaited<ReturnType<SignalCliAdapter["receive"]>>[number];
+  event: Awaited<ReturnType<TelegramBotAdapter["receive"]>>[number];
   db: Db;
   manager: AgentManager;
-  signal: SignalCliAdapter;
+  chat: TelegramBotAdapter;
   stt: SttAdapter | null;
   cfg: Awaited<ReturnType<typeof loadOrCreateConfig>>;
   paths: ReturnType<typeof getRuntimePaths>;
+  botUsername: string;
 }): Promise<void> {
-  const { event, db, manager, signal, stt, cfg, paths } = args;
+  const { event, db, manager, chat, stt, cfg, paths, botUsername } = args;
 
-  // Ignore sync echoes that originated from non-primary linked devices (e.g. this server device).
-  if (event.isSyncSent && event.sourceDevice !== undefined && event.sourceDevice !== 1) {
+  if ((event.chatType === "group" || event.chatType === "supergroup" || event.chatType === "channel") && !cfg.telegram.allowGroups) {
     return;
   }
 
-  const user = await db.getUserByPhone(event.source);
-  if (!user) {
-    logger.warn("message from unauthorized source", { source: event.source });
-    await signal.sendMessage(event.source, "This number is not active in Cognal whitelist.");
+  const user = await db.getUserByTelegramUserId(event.fromUserId);
+  if (!user || user.status !== "active") {
+    await db.recordAccessRequest(event.fromUserId, event.chatId, event.fromUsername, event.displayName, "pending");
+    await chat.sendMessage(
+      event.chatId,
+      `Access denied. Your Telegram user ID is ${event.fromUserId}. Ask the host admin to run: cognal user approve --telegram-user-id ${event.fromUserId}`
+    );
     return;
-  }
-  if (user.status === "revoked") {
-    await signal.sendMessage(event.source, "Your access was revoked.");
-    return;
-  }
-  if (user.status === "pending") {
-    await db.setUserStatus(user.id, "active");
   }
 
-  const inboundMessageId = await db.insertMessage(user.id, event.signalMessageId, "in", event.text || "");
+  await db.touchTelegramUserSeen(event.fromUserId, event.fromUsername, event.displayName);
+
+  const isGroup = event.chatType === "group" || event.chatType === "supergroup" || event.chatType === "channel";
+  if (isGroup) {
+    const chatAllowed = await db.isChatAllowed(event.chatId);
+    if (!chatAllowed) {
+      await chat.sendMessage(event.chatId, `This chat is not allowed. Ask admin to run: cognal chat allow --chat-id ${event.chatId}`);
+      return;
+    }
+    if (!event.isCommand && !event.isMentioned && !event.isReplyToBot) {
+      return;
+    }
+  }
+
+  const inboundMessageId = await db.insertMessage(user.id, event.transportMessageId, event.chatId, "in", event.text || "");
 
   const stagedAttachments: InboundAttachment[] = [];
-  for (const att of event.attachments) {
+  for (let idx = 0; idx < event.attachments.length; idx += 1) {
+    const att = event.attachments[idx];
+    const downloadPath = path.join(paths.tempDir, `${Date.now()}-${idx}-${safeFileName(att.fileName)}`);
     try {
+      await chat.downloadAttachment(att.fileId, downloadPath);
       const staged = await stageIncomingAttachment(
-        att.localPath,
+        downloadPath,
         att.fileName,
         att.contentType,
         paths.tempDir,
@@ -130,27 +147,32 @@ async function processInboundEvent(args: {
       stagedAttachments.push(staged);
       await db.insertAttachment(inboundMessageId, staged);
     } catch (err) {
-      logger.warn("failed staging attachment", { error: String(err), path: att.localPath });
+      logger.warn("failed staging attachment", { error: String(err), fileId: att.fileId });
+    } finally {
+      try {
+        await fs.unlink(downloadPath);
+      } catch {
+        // ignore
+      }
     }
   }
 
-  const route = routeTextInput(event.text || "");
+  const route = routeTextInput(event.text || "", botUsername);
 
   if (route.type === "switch_agent") {
     if (!isAgentEnabled(cfg, route.agent)) {
-      await signal.sendMessage(event.source, `Agent '${route.agent}' is disabled on this host.`);
+      await chat.sendMessage(event.chatId, `Agent '${route.agent}' is disabled on this host.`);
       return;
     }
     await manager.switchAgent(user.id, route.agent);
-    await signal.sendMessage(event.source, `Switched active agent to ${route.agent}.`);
+    await chat.sendMessage(event.chatId, `Switched active agent to ${route.agent}.`);
     return;
   }
 
-  const passthroughText = route.type === "passthrough" ? route.payload : route.payload;
   const parts: string[] = [];
-
-  if (passthroughText.trim()) {
-    parts.push(passthroughText);
+  const inboundText = route.payload.trim();
+  if (inboundText) {
+    parts.push(inboundText);
   }
 
   const attachmentSummary = buildAttachmentSummary(stagedAttachments);
@@ -186,10 +208,10 @@ async function processInboundEvent(args: {
     responseText = `Agent execution failed: ${String(err)}`;
   }
 
-  await db.insertMessage(user.id, event.signalMessageId, "out", responseText);
+  await db.insertMessage(user.id, null, event.chatId, "out", responseText);
   const chunks = chunkText(responseText, cfg.routing.responseChunkSize);
   for (const chunk of chunks) {
-    await signal.sendMessage(event.source, chunk);
+    await chat.sendMessage(event.chatId, chunk);
   }
 }
 

@@ -15,50 +15,28 @@ describe("config multi-project defaults", () => {
     expect(a).not.toBe(b);
   });
 
-  it("defaults signal data dir to project-local path", () => {
+  it("defaults telegram config", () => {
     const cfg = defaultConfig("/srv/project-a");
-    expect(cfg.signal.dataDir).toBe("/srv/project-a/.cognal/signal-cli");
+    expect(cfg.telegram.botTokenEnv).toBe("TELEGRAM_BOT_TOKEN");
+    expect(cfg.telegram.receiveTimeoutSec).toBe(30);
+    expect(cfg.telegram.allowGroups).toBe(true);
+    expect(cfg.routing.responseChunkSize).toBe(3500);
   });
 
-  it("defaults public dump config to litterbox", () => {
-    const cfg = defaultConfig("/srv/project-a");
-    expect(cfg.delivery.modeDefault).toBe("public_encrypted");
-    expect(cfg.delivery.publicDump.endpoint).toBe("https://litterbox.catbox.moe/resources/internals/api.php");
-    expect(cfg.delivery.publicDump.fileField).toBe("fileToUpload");
-    expect(cfg.delivery.publicDump.timeoutSec).toBe(45);
-    expect(cfg.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload", time: "24h" });
-  });
-
-  it("migrates legacy 0x0 dump config to litterbox defaults", () => {
-    const cfg = defaultConfig("/srv/project-a");
-    cfg.delivery.publicDump.endpoint = "https://0x0.st";
-    cfg.delivery.publicDump.fileField = "file";
+  it("migrates legacy signal receive timeout into telegram timeout", () => {
+    const cfg = defaultConfig("/srv/project-a") as any;
+    delete cfg.telegram;
+    cfg.signal = { receiveTimeoutSec: 9 };
     const normalized = normalizeConfig(cfg, "/srv/project-a");
-    expect(normalized.delivery.publicDump.endpoint).toBe("https://litterbox.catbox.moe/resources/internals/api.php");
-    expect(normalized.delivery.publicDump.fileField).toBe("fileToUpload");
-    expect(normalized.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload", time: "24h" });
-    expect(normalized.delivery.modeDefault).toBe("public_encrypted");
+    expect(normalized.telegram.receiveTimeoutSec).toBe(9);
+    expect(normalized.telegram.botTokenEnv).toBe("TELEGRAM_BOT_TOKEN");
   });
 
-  it("migrates legacy uguu dump config to litterbox defaults", () => {
+  it("ensures at least one agent is enabled", () => {
     const cfg = defaultConfig("/srv/project-a");
-    cfg.delivery.publicDump.endpoint = "https://uguu.se/upload.php";
-    cfg.delivery.publicDump.fileField = "files[]";
+    cfg.agents.enabled.claude = false;
+    cfg.agents.enabled.codex = false;
     const normalized = normalizeConfig(cfg, "/srv/project-a");
-    expect(normalized.delivery.publicDump.endpoint).toBe("https://litterbox.catbox.moe/resources/internals/api.php");
-    expect(normalized.delivery.publicDump.fileField).toBe("fileToUpload");
-    expect(normalized.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload", time: "24h" });
-    expect(normalized.delivery.modeDefault).toBe("public_encrypted");
-  });
-
-  it("migrates legacy catbox dump config to litterbox defaults", () => {
-    const cfg = defaultConfig("/srv/project-a");
-    cfg.delivery.publicDump.endpoint = "https://catbox.moe/user/api.php";
-    cfg.delivery.publicDump.fileField = "fileToUpload";
-    const normalized = normalizeConfig(cfg, "/srv/project-a");
-    expect(normalized.delivery.publicDump.endpoint).toBe("https://litterbox.catbox.moe/resources/internals/api.php");
-    expect(normalized.delivery.publicDump.fileField).toBe("fileToUpload");
-    expect(normalized.delivery.publicDump.extraFields).toEqual({ reqtype: "fileupload", time: "24h" });
-    expect(normalized.delivery.modeDefault).toBe("public_encrypted");
+    expect(normalized.agents.enabled.codex).toBe(true);
   });
 });

@@ -1,26 +1,25 @@
 # Cognal
 
-Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Signal messages to Claude Code or Codex.
+Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Telegram chats to Claude Code or Codex.
 
 ## Key behavior
 
-- Multi-user whitelist (phone).
-- Multi-project capable on one server (project-scoped service name).
-- Signal onboarding via device-linking QR.
-- `/claude` and `/codex` switch active agent per user.
+- Multi-project capable on one server (project-scoped `systemd` service per project).
+- Telegram Bot API transport via long polling (no inbound port needed).
+- `/claude` and `/codex` switch the active agent per user.
 - All other slash commands are passed through unchanged.
 - Single-active-agent policy per user (RAM saving).
+- Session resume across agent restarts (`claude --resume/--continue`, `codex resume`).
 - Audio transcription via OpenAI `whisper-1` (auto language).
 - Attachments are temporary and cleaned up by TTL.
-- Default QR delivery is `public_encrypted` (public upload + separate password).
+- Access control: user allow-list (`telegram_user_id`) + group allow-list (`chat_id`).
 
 ## Requirements
 
 - Ubuntu/Debian with `systemd`
 - Node.js 20+
-- `signal-cli`
+- Telegram bot token from [@BotFather](https://t.me/BotFather)
 - `claude` CLI and/or `codex` CLI (selected in setup)
-- Optional: Override public dump endpoint via `COGNAL_PUBLIC_DUMP_ENDPOINT`
 
 ## Install
 
@@ -33,29 +32,21 @@ npm link
 One-liner install (clone + build + link + setup):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/refs/heads/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh
 ```
 
-On Ubuntu/Debian, the installer also auto-installs missing `java` and `signal-cli` from the latest GitHub release (requires `sudo`).
+By default this installs Cognal source into `~/.local/share/cognal` and runs `setup` for your current directory as project root.
 
-By default this installs Cognal source into `~/.local/share/cognal` and runs `setup` for your **current directory** as project root.
-
-You can pass options via `sh -s -- ...`:
+Optional flags via `sh -s -- ...`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/refs/heads/main/scripts/install.sh | sh -s -- --project-dir /srv/myproj --providers codex --distro ubuntu
-```
-
-Skip auto-install of Java/signal-cli prerequisites:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/refs/heads/main/scripts/install.sh | sh -s -- --skip-prereqs
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh -s -- --project-dir /srv/myproj --providers codex --distro ubuntu
 ```
 
 Skip onboarding prompts:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/refs/heads/main/scripts/install.sh | sh -s -- --skip-onboarding
+curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/main/scripts/install.sh | sh -s -- --skip-onboarding
 ```
 
 ## Setup
@@ -64,16 +55,17 @@ curl -fsSL https://raw.githubusercontent.com/tscherrie/cognal/refs/heads/main/sc
 cognal setup --distro ubuntu
 ```
 
-`cognal setup` interactively asks which providers should be enabled: `claude`, `codex`, or `both`.
-If an enabled provider CLI is missing, setup installs it automatically (`npm i -g ...`).
-Setup performs Signal onboarding first, then runs native provider login/setup flows at the end.
-Before provider auth, setup asks per provider whether you want `api_key` or `auth_login`.
-If you pick `api_key`, setup asks for the key and shows the provider URL:
-- Claude key: `https://console.anthropic.com/settings/keys`
-- Codex/OpenAI key: `https://platform.openai.com/api-keys`
-Provided keys are written to `./.cognal/cognald.env` for daemon runtime.
-In non-interactive shells, provider setup is skipped unless `--run-provider-setup` is passed.
-You can also force this non-interactively:
+`cognal setup` does:
+
+1. Select providers: `claude`, `codex`, `both`.
+2. Ask for Telegram bot token and validate via `getMe`.
+3. Ask whether group/supergroup chats are enabled.
+4. Optional onboarding: initial user IDs and group chat IDs.
+5. Install missing provider CLIs automatically (`npm i -g ...`).
+6. Optional provider auth flow (`api_key` or native `auth_login`).
+7. Create `./.cognal/config.toml`, SQLite state, and install/start project-scoped `systemd` service.
+
+Setup options:
 
 ```bash
 cognal setup --providers claude
@@ -82,22 +74,6 @@ cognal setup --providers both
 cognal setup --run-provider-setup
 cognal setup --skip-provider-install
 cognal setup --skip-provider-setup
-```
-
-This creates `./.cognal/config.toml`, SQLite state, and installs/starts a project-scoped systemd service.
-
-During setup, Cognal can also interactively add initial allowed Signal users (phone only).
-When generating a link QR, keep the command running until Signal confirms device-link completion.
-If the Signal provisioning window closes, Cognal automatically generates a fresh QR up to 3 attempts.
-
-Each project gets its own systemd unit name, e.g. `cognald-myproj-a1b2c3d4`.
-Use `-p` to target another project root:
-
-```bash
-cognal -p /srv/project-a setup
-cognal -p /srv/project-b setup
-cognal -p /srv/project-a status
-cognal -p /srv/project-b logs --follow
 ```
 
 ## Core commands
@@ -113,10 +89,37 @@ cognal doctor
 cognal update
 cognal uninstall
 
-cognal user add --phone +15551234567
+cognal user add --telegram-user-id 123456789
 cognal user list
-cognal user revoke --phone +15551234567
-cognal user relink --phone +15551234567
+cognal user revoke --telegram-user-id 123456789
+cognal user requests
+cognal user approve --telegram-user-id 123456789
+
+cognal chat allow --chat-id -1001234567890 --type supergroup
+cognal chat list
+cognal chat revoke --chat-id -1001234567890
+```
+
+## How to chat with Cognal
+
+1. Message the configured bot in Telegram.
+2. If your user ID is not approved, Cognal replies with your Telegram user ID.
+3. Host admin runs `cognal user approve --telegram-user-id <id>`.
+4. For group use, admin also runs `cognal chat allow --chat-id <id>`.
+5. In private chats all messages are processed. In groups, Cognal processes only:
+   - commands,
+   - mentions,
+   - replies to the bot.
+
+## Multi-project usage
+
+Each project gets its own service, e.g. `cognald-myproj-a1b2c3d4`.
+
+```bash
+cognal -p /srv/project-a setup
+cognal -p /srv/project-b setup
+cognal -p /srv/project-a status
+cognal -p /srv/project-b logs --follow
 ```
 
 ## Uninstall
@@ -127,47 +130,16 @@ Interactive uninstall:
 cognal uninstall
 ```
 
-It asks whether to:
-
-- remove the project service (`systemd`)
-- remove project workspace state (`./.cognal`)
-- remove global CLI link (`npm unlink -g cognal`)
-- remove provider CLIs (`claude`, `codex`)
-
-Non-interactive:
-
-```bash
-cognal uninstall --yes --remove-workspace --remove-global
-```
-
-Full wipe (no prompts):
+Non-interactive full wipe:
 
 ```bash
 cognal uninstall --all
 ```
 
-Provider-only CLI cleanup:
+Remove only Telegram token + access allow-lists while keeping workspace files:
 
 ```bash
-cognal uninstall --yes --remove-providers
-# or individually:
-cognal uninstall --yes --remove-claude-cli
-cognal uninstall --yes --remove-codex-cli
-```
-
-## Public encrypted QR mode
-
-`public_encrypted` creates an encrypted HTML bundle that contains the QR image ciphertext. The file is uploaded to a public dump host (default `https://litterbox.catbox.moe/resources/internals/api.php`), and Cognal prints:
-
-- public URL
-- one-time password
-
-Share URL and password separately.
-
-## Daemon run (manual)
-
-```bash
-COGNAL_PROJECT_ROOT=/path/to/project node dist/daemon.js
+cognal uninstall --yes --remove-telegram-state
 ```
 
 ## Config
@@ -176,19 +148,19 @@ Main config path: `./.cognal/config.toml`
 
 Important fields:
 
-- `signal.command`, `signal.dataDir`
+- `telegram.botTokenEnv` (default `TELEGRAM_BOT_TOKEN`)
+- `telegram.botUsername`
+- `telegram.receiveTimeoutSec`
+- `telegram.allowGroups`
 - `runtime.serviceName` (project-scoped unit)
 - `agents.enabled` (`claude`, `codex` booleans)
 - `agents.claude.command`, `agents.codex.command`
 - `routing.failoverEnabled`
+- `routing.responseChunkSize`
 - `stt.apiKeyEnv` (default `OPENAI_API_KEY`)
-- `delivery.modeDefault` (`public_encrypted`)
-- `delivery.publicDump.endpoint` (default `https://litterbox.catbox.moe/resources/internals/api.php`)
-- `delivery.publicDump.fileField` (default `fileToUpload`)
-- `delivery.publicDump.timeoutSec` (default `45`)
-- `delivery.publicDump.extraFields.reqtype` (default `fileupload`)
-- `delivery.publicDump.extraFields.time` (default `24h`)
 - `retention.attachmentsHours`
+
+Daemon env path: `./.cognal/cognald.env`
 
 ## Testing
 

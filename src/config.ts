@@ -4,17 +4,8 @@ import { createHash } from "node:crypto";
 import TOML from "@iarna/toml";
 import type { AgentType } from "./types.js";
 
-const DEFAULT_PUBLIC_DUMP_ENDPOINT = "https://litterbox.catbox.moe/resources/internals/api.php";
-const DEFAULT_PUBLIC_DUMP_FILE_FIELD = "fileToUpload";
-const DEFAULT_PUBLIC_DUMP_EXTRA_FIELDS: Record<string, string> = {
-  reqtype: "fileupload",
-  time: "24h"
-};
-const LEGACY_PUBLIC_DUMP_ENDPOINT = "https://0x0.st";
-const SECONDARY_LEGACY_PUBLIC_DUMP_ENDPOINT = "https://uguu.se/upload.php";
-const TERTIARY_LEGACY_PUBLIC_DUMP_ENDPOINT = "https://catbox.moe/user/api.php";
-
 export type ProviderSelection = "claude" | "codex" | "both";
+
 export interface EnabledAgents {
   claude: boolean;
   codex: boolean;
@@ -27,11 +18,11 @@ export interface CognalConfig {
     distro: "ubuntu" | "debian";
     serviceName: string;
   };
-  signal: {
-    command: string;
-    dataDir: string;
+  telegram: {
+    botTokenEnv: string;
+    botUsername?: string;
     receiveTimeoutSec: number;
-    account?: string;
+    allowGroups: boolean;
   };
   agents: {
     enabled: EnabledAgents;
@@ -53,28 +44,6 @@ export interface CognalConfig {
     model: "whisper-1";
     apiKeyEnv: string;
   };
-  delivery: {
-    modeDefault: "public_encrypted";
-    resend: {
-      apiKeyEnv: string;
-      from: string;
-    };
-    storage: {
-      endpoint?: string;
-      region?: string;
-      bucket?: string;
-      accessKeyEnv?: string;
-      secretKeyEnv?: string;
-      publicBaseUrl?: string;
-      presignedTtlSec: number;
-    };
-    publicDump: {
-      endpoint: string;
-      fileField: string;
-      timeoutSec: number;
-      extraFields?: Record<string, string>;
-    };
-  };
   retention: {
     attachmentsHours: number;
   };
@@ -91,9 +60,8 @@ export interface RuntimePaths {
   dbPath: string;
   configPath: string;
   tempDir: string;
-  linksDir: string;
   logsDir: string;
-  signalDir: string;
+  telegramOffsetPath: string;
   pidPath: string;
 }
 
@@ -105,9 +73,8 @@ export function getRuntimePaths(projectRoot: string): RuntimePaths {
     dbPath: path.join(cognalDir, "cognal.db"),
     configPath: path.join(cognalDir, "config.toml"),
     tempDir: path.join(cognalDir, "tmp"),
-    linksDir: path.join(cognalDir, "links"),
     logsDir: path.join(cognalDir, "logs"),
-    signalDir: path.join(cognalDir, "signal-cli"),
+    telegramOffsetPath: path.join(cognalDir, "telegram.offset"),
     pidPath: path.join(cognalDir, "cognald.pid")
   };
 }
@@ -132,10 +99,10 @@ export function defaultConfig(projectRoot: string): CognalConfig {
       distro: "ubuntu",
       serviceName: computeServiceName(projectRoot, projectId)
     },
-    signal: {
-      command: "signal-cli",
-      dataDir: path.join(projectRoot, ".cognal", "signal-cli"),
-      receiveTimeoutSec: 5
+    telegram: {
+      botTokenEnv: "TELEGRAM_BOT_TOKEN",
+      receiveTimeoutSec: 30,
+      allowGroups: true
     },
     agents: {
       enabled: {
@@ -153,28 +120,12 @@ export function defaultConfig(projectRoot: string): CognalConfig {
     },
     routing: {
       failoverEnabled: true,
-      responseChunkSize: 3000
+      responseChunkSize: 3500
     },
     stt: {
       provider: "openai",
       model: "whisper-1",
       apiKeyEnv: "OPENAI_API_KEY"
-    },
-    delivery: {
-      modeDefault: "public_encrypted",
-      resend: {
-        apiKeyEnv: "RESEND_API_KEY",
-        from: "Cognal <noreply@example.com>"
-      },
-      storage: {
-        presignedTtlSec: 900
-      },
-      publicDump: {
-        endpoint: DEFAULT_PUBLIC_DUMP_ENDPOINT,
-        fileField: DEFAULT_PUBLIC_DUMP_FILE_FIELD,
-        timeoutSec: 45,
-        extraFields: { ...DEFAULT_PUBLIC_DUMP_EXTRA_FIELDS }
-      }
     },
     retention: {
       attachmentsHours: 24
@@ -190,9 +141,7 @@ export function defaultConfig(projectRoot: string): CognalConfig {
 export async function ensureRuntimeDirs(paths: RuntimePaths): Promise<void> {
   await fs.mkdir(paths.cognalDir, { recursive: true });
   await fs.mkdir(paths.tempDir, { recursive: true });
-  await fs.mkdir(paths.linksDir, { recursive: true });
   await fs.mkdir(paths.logsDir, { recursive: true });
-  await fs.mkdir(paths.signalDir, { recursive: true });
 }
 
 export async function loadConfig(paths: RuntimePaths): Promise<CognalConfig> {
@@ -217,53 +166,81 @@ export async function loadOrCreateConfig(paths: RuntimePaths): Promise<CognalCon
 }
 
 export function normalizeConfig(cfg: CognalConfig, projectRoot = cfg.projectId): CognalConfig {
-  const normalized = cfg;
+  const defaults = defaultConfig(projectRoot);
+  const normalized = cfg as CognalConfig & {
+    signal?: {
+      receiveTimeoutSec?: number;
+    };
+  };
+
+  normalized.projectId = normalized.projectId || defaults.projectId;
+  normalized.runtime = normalized.runtime || defaults.runtime;
+  normalized.runtime.osMode = "linux";
+  normalized.runtime.distro = normalized.runtime.distro === "debian" ? "debian" : "ubuntu";
   if (!normalized.runtime.serviceName) {
     normalized.runtime.serviceName = computeServiceName(projectRoot, normalized.projectId);
   }
-  if (!normalized.signal.dataDir) {
-    normalized.signal.dataDir = path.join(projectRoot, ".cognal", "signal-cli");
+
+  if (!normalized.telegram) {
+    const legacyReceive = normalized.signal?.receiveTimeoutSec;
+    normalized.telegram = {
+      botTokenEnv: "TELEGRAM_BOT_TOKEN",
+      receiveTimeoutSec:
+        typeof legacyReceive === "number" && legacyReceive > 0 ? legacyReceive : defaults.telegram.receiveTimeoutSec,
+      allowGroups: true
+    };
+  }
+  if (!normalized.telegram.botTokenEnv) {
+    normalized.telegram.botTokenEnv = defaults.telegram.botTokenEnv;
+  }
+  if (!normalized.telegram.receiveTimeoutSec || normalized.telegram.receiveTimeoutSec <= 0) {
+    normalized.telegram.receiveTimeoutSec = defaults.telegram.receiveTimeoutSec;
+  }
+  if (typeof normalized.telegram.allowGroups !== "boolean") {
+    normalized.telegram.allowGroups = true;
+  }
+
+  if (!normalized.agents) {
+    normalized.agents = defaults.agents;
   }
   if (!normalized.agents.enabled) {
-    normalized.agents.enabled = { claude: true, codex: true };
+    normalized.agents.enabled = { ...defaults.agents.enabled };
   }
   if (!normalized.agents.enabled.claude && !normalized.agents.enabled.codex) {
     normalized.agents.enabled.codex = true;
   }
-
-  if (!normalized.delivery.publicDump) {
-    normalized.delivery.publicDump = {
-      endpoint: DEFAULT_PUBLIC_DUMP_ENDPOINT,
-      fileField: DEFAULT_PUBLIC_DUMP_FILE_FIELD,
-      timeoutSec: 45,
-      extraFields: { ...DEFAULT_PUBLIC_DUMP_EXTRA_FIELDS }
-    };
-  } else {
-    const endpoint = normalized.delivery.publicDump.endpoint?.trim();
-    const fileField = normalized.delivery.publicDump.fileField?.trim();
-    const isLegacyEndpoint =
-      endpoint === LEGACY_PUBLIC_DUMP_ENDPOINT ||
-      endpoint === SECONDARY_LEGACY_PUBLIC_DUMP_ENDPOINT ||
-      endpoint === TERTIARY_LEGACY_PUBLIC_DUMP_ENDPOINT;
-    if (!endpoint || isLegacyEndpoint) {
-      normalized.delivery.publicDump.endpoint = DEFAULT_PUBLIC_DUMP_ENDPOINT;
-    }
-    if (!fileField || isLegacyEndpoint) {
-      normalized.delivery.publicDump.fileField = DEFAULT_PUBLIC_DUMP_FILE_FIELD;
-    }
-    if (!normalized.delivery.publicDump.timeoutSec || normalized.delivery.publicDump.timeoutSec <= 0) {
-      normalized.delivery.publicDump.timeoutSec = 45;
-    }
-    if (
-      !normalized.delivery.publicDump.extraFields ||
-      Object.keys(normalized.delivery.publicDump.extraFields).length === 0 ||
-      isLegacyEndpoint
-    ) {
-      normalized.delivery.publicDump.extraFields = { ...DEFAULT_PUBLIC_DUMP_EXTRA_FIELDS };
-    }
+  if (!normalized.agents.claude) {
+    normalized.agents.claude = { ...defaults.agents.claude };
+  }
+  if (!normalized.agents.codex) {
+    normalized.agents.codex = { ...defaults.agents.codex };
   }
 
-  normalized.delivery.modeDefault = "public_encrypted";
+  if (!normalized.routing) {
+    normalized.routing = defaults.routing;
+  }
+  if (!normalized.routing.responseChunkSize || normalized.routing.responseChunkSize <= 0) {
+    normalized.routing.responseChunkSize = defaults.routing.responseChunkSize;
+  }
+
+  if (!normalized.stt) {
+    normalized.stt = defaults.stt;
+  }
+  if (!normalized.retention) {
+    normalized.retention = defaults.retention;
+  }
+  if (!normalized.timeouts) {
+    normalized.timeouts = defaults.timeouts;
+  }
+  if (!normalized.timeouts.agentIdleMs || normalized.timeouts.agentIdleMs <= 0) {
+    normalized.timeouts.agentIdleMs = defaults.timeouts.agentIdleMs;
+  }
+  if (!normalized.timeouts.agentResponseSec || normalized.timeouts.agentResponseSec <= 0) {
+    normalized.timeouts.agentResponseSec = defaults.timeouts.agentResponseSec;
+  }
+  if (!normalized.timeouts.failoverRetrySec || normalized.timeouts.failoverRetrySec <= 0) {
+    normalized.timeouts.failoverRetrySec = defaults.timeouts.failoverRetrySec;
+  }
 
   return normalized;
 }

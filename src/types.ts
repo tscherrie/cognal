@@ -4,10 +4,11 @@ export type UserStatus = "pending" | "active" | "revoked";
 
 export interface UserRecord {
   id: string;
-  phoneE164: string;
-  email: string;
-  signalAccountId: string | null;
+  telegramUserId: string | null;
+  telegramUsername: string | null;
+  displayName: string | null;
   status: UserStatus;
+  lastSeenAt: string | null;
   createdAt: string;
 }
 
@@ -28,10 +29,16 @@ export interface InboundAttachment {
 }
 
 export interface InboundEnvelope {
-  userId: string;
-  phoneE164: string;
-  signalMessageId: string;
+  chatId: string;
+  chatType: "private" | "group" | "supergroup" | "channel";
+  fromUserId: string;
+  fromUsername: string | null;
+  displayName: string | null;
+  transportMessageId: string;
   text: string;
+  isCommand: boolean;
+  isMentioned: boolean;
+  isReplyToBot: boolean;
   attachments: InboundAttachment[];
   receivedAt: string;
 }
@@ -53,16 +60,26 @@ export interface SendContext {
   attachmentsSummary?: string;
 }
 
-export interface DeliveryResult {
-  mode: "email" | "link" | "local" | "public_encrypted";
-  target: string;
-  expiresAt?: string;
-  secret?: string;
-}
-
 export interface TranscriptionResult {
   text: string;
   language?: string;
+}
+
+export interface AccessRequestRecord {
+  telegramUserId: string;
+  chatId: string;
+  username: string | null;
+  displayName: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  status: "pending" | "approved" | "rejected";
+}
+
+export interface AllowedChatRecord {
+  chatId: string;
+  chatType: "private" | "group" | "supergroup" | "channel";
+  title: string | null;
+  createdAt: string;
 }
 
 export interface HealthCheckResult {
