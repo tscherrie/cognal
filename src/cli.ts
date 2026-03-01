@@ -18,7 +18,7 @@ import {
 } from "./config.js";
 import type { CognalConfig, ProviderSelection } from "./config.js";
 import { Db } from "./core/db.js";
-import { commandExists, runCommand, runInteractiveCommand } from "./core/utils.js";
+import { commandExists, runCommand, runInteractiveCommand, resolveCommandPath } from "./core/utils.js";
 import { Logger } from "./core/logger.js";
 import type { AllowedChatRecord, HealthCheckResult } from "./types.js";
 import { TelegramBotAdapter } from "./adapters/telegramBotAdapter.js";
@@ -405,6 +405,21 @@ async function installProviderCli(spec: ProviderRuntimeSpec): Promise<void> {
   }
 }
 
+async function pinProviderCommandPaths(cfg: CognalConfig): Promise<void> {
+  if (cfg.agents.enabled.claude) {
+    const resolved = await resolveCommandPath(cfg.agents.claude.command);
+    if (resolved) {
+      cfg.agents.claude.command = resolved;
+    }
+  }
+  if (cfg.agents.enabled.codex) {
+    const resolved = await resolveCommandPath(cfg.agents.codex.command);
+    if (resolved) {
+      cfg.agents.codex.command = resolved;
+    }
+  }
+}
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -455,10 +470,10 @@ async function doctorChecks(projectRoot: string, cfg: CognalConfig): Promise<Hea
   const checks: HealthCheckResult[] = [];
   const binaries = ["node", "npm", "systemctl"];
   if (cfg.agents.enabled.claude) {
-    binaries.push("claude");
+    binaries.push(cfg.agents.claude.command);
   }
   if (cfg.agents.enabled.codex) {
-    binaries.push("codex");
+    binaries.push(cfg.agents.codex.command);
   }
 
   for (const bin of binaries) {
@@ -601,6 +616,9 @@ program
         }
       }
     }
+
+    await pinProviderCommandPaths(cfg);
+    await saveConfig(paths, cfg);
 
     let shouldRunProviderSetup = false;
     if (!opts.skipProviderSetup) {

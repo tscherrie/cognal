@@ -98,6 +98,16 @@ export async function commandExists(command: string): Promise<boolean> {
   return result.code === 0;
 }
 
+export async function resolveCommandPath(command: string): Promise<string | null> {
+  const escaped = command.replace(/(["\\$`])/g, "\\$1");
+  const result = await runCommand("bash", ["-lc", `command -v \"${escaped}\"`], { timeoutMs: 3000 });
+  if (result.code !== 0) {
+    return null;
+  }
+  const resolved = result.stdout.trim().split(/\r?\n/).find(Boolean) ?? "";
+  return resolved || null;
+}
+
 export function chunkText(text: string, size: number): string[] {
   if (text.length <= size) {
     return [text];

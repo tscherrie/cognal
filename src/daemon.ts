@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { promises as fs } from "node:fs";
+import { promises as fs, constants as fsConstants } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { loadOrCreateConfig, getRuntimePaths, ensureRuntimeDirs, getDefaultAgent, getEnabledAgents, isAgentEnabled } from "./config.js";
@@ -16,6 +16,37 @@ import { AgentManager } from "./agents/manager.js";
 import type { AgentType, InboundAttachment } from "./types.js";
 
 const logger = new Logger("daemon");
+
+async function isExecutable(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveAgentCommand(preferred: string): Promise<string | null> {
+  if (preferred.includes("/") && (await isExecutable(preferred))) {
+    return preferred;
+  }
+
+  const home = process.env.HOME || "";
+  const candidates = [
+    preferred,
+    `/usr/local/bin/${preferred}`,
+    `/usr/bin/${preferred}`,
+    home ? path.join(home, ".npm-global", "bin", preferred) : "",
+    home ? path.join(home, ".local", "bin", preferred) : ""
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (candidate.includes("/") && (await isExecutable(candidate))) {
+      return candidate;
+    }
+  }
+  return null;
+}
 
 async function main(): Promise<void> {
   const projectRoot = process.env.COGNAL_PROJECT_ROOT || process.cwd();
@@ -43,10 +74,22 @@ async function main(): Promise<void> {
 
   const adapters: Partial<Record<AgentType, ClaudeAdapter | CodexAdapter>> = {};
   if (cfg.agents.enabled.claude) {
-    adapters.claude = new ClaudeAdapter(cfg.agents.claude.command, cfg.agents.claude.args);
+    const command = await resolveAgentCommand(cfg.agents.claude.command);
+    if (!command) {
+      throw new Error(
+        `Claude command not found ('${cfg.agents.claude.command}'). Re-run 'cognal setup' or set an absolute path in .cognal/config.toml.`
+      );
+    }
+    adapters.claude = new ClaudeAdapter(command, cfg.agents.claude.args);
   }
   if (cfg.agents.enabled.codex) {
-    adapters.codex = new CodexAdapter(cfg.agents.codex.command, cfg.agents.codex.args);
+    const command = await resolveAgentCommand(cfg.agents.codex.command);
+    if (!command) {
+      throw new Error(
+        `Codex command not found ('${cfg.agents.codex.command}'). Re-run 'cognal setup' or set an absolute path in .cognal/config.toml.`
+      );
+    }
+    adapters.codex = new CodexAdapter(command, cfg.agents.codex.args);
   }
 
   const manager = new AgentManager(db, adapters, {
