@@ -155,6 +155,16 @@ function printTelegramBotFatherGuide(tokenEnvName: string): void {
   process.stdout.write(`  9) Cognal stores this token in ./.cognal/cognald.env as ${tokenEnvName}\n\n`);
 }
 
+function printTelegramUserIdGuide(): void {
+  process.stdout.write("\nHow to find Telegram user IDs (step by step):\n");
+  process.stdout.write("  1) Open Telegram and search for @userinfobot\n");
+  process.stdout.write("  2) Send /start\n");
+  process.stdout.write("  3) Copy the numeric 'Id' value (example: 123456789)\n");
+  process.stdout.write("  4) Paste those IDs below (comma-separated)\n");
+  process.stdout.write("  5) If you skip now, users can message your bot once and you can run: cognal user requests\n");
+  process.stdout.write("  6) Then approve with: cognal user approve --telegram-user-id <id>\n\n");
+}
+
 function parseEnvFile(raw: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const line of raw.split(/\r?\n/)) {
@@ -415,6 +425,7 @@ async function runSetupOnboarding(projectRoot: string, cfg: CognalConfig): Promi
       return;
     }
 
+    printTelegramUserIdGuide();
     process.stdout.write("Telegram user ID example: 123456789\n");
     const usersRaw = await promptText("Allowed Telegram user IDs (comma-separated, empty to skip)");
     for (const rawId of parseCsv(usersRaw)) {

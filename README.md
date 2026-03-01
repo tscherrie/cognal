@@ -75,6 +75,14 @@ BotFather quick path:
 4. Set bot name + unique username ending in `bot`
 5. Copy token (`123456789:AA...`) and paste into setup prompt
 
+During onboarding, Cognal also prints how to find Telegram user IDs:
+
+1. Open [@userinfobot](https://t.me/userinfobot)
+2. Send `/start`
+3. Copy numeric `Id` (example: `123456789`)
+4. Paste IDs into setup prompt (comma-separated)
+5. Or skip now: let users message the bot once, then run `cognal user requests` and `cognal user approve --telegram-user-id <id>`
+
 Setup options:
 
 ```bash
