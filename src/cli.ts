@@ -420,6 +420,18 @@ async function pinProviderCommandPaths(cfg: CognalConfig): Promise<void> {
   }
 }
 
+async function configureCodexApiKeyLogin(command: string, apiKey: string): Promise<void> {
+  const result = await runCommand(command, ["login", "--with-api-key"], {
+    stdin: `${apiKey}\n`,
+    timeoutMs: 45_000,
+    env: process.env
+  });
+  if (result.code !== 0) {
+    const detail = (result.stderr || result.stdout || "unknown error").trim();
+    throw new Error(`codex login --with-api-key failed: ${detail}`);
+  }
+}
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -657,6 +669,10 @@ program
 
         daemonEnvUpdates[spec.apiKeyEnv] = finalKey;
         process.env[spec.apiKeyEnv] = finalKey;
+        if (spec.label === "Codex") {
+          await configureCodexApiKeyLogin(spec.command, finalKey);
+          process.stdout.write("[OK] Codex API-key login configured via codex login --with-api-key.\n");
+        }
         process.stdout.write(`[OK] ${spec.apiKeyEnv} configured for ${spec.label}.\n`);
       }
 
