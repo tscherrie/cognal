@@ -82,10 +82,14 @@ echo "Target project: ${PROJECT_DIR}"
 if [ -d "${INSTALL_DIR}/.git" ]; then
   git -C "${INSTALL_DIR}" fetch --all --tags
   git -C "${INSTALL_DIR}" checkout "${REF}"
-  git -C "${INSTALL_DIR}" pull --ff-only origin "${REF}" || true
+  if git -C "${INSTALL_DIR}" rev-parse --verify --quiet "refs/remotes/origin/${REF}" >/dev/null; then
+    git -C "${INSTALL_DIR}" pull --ff-only origin "${REF}" || true
+  fi
 else
   rm -rf "${INSTALL_DIR}"
-  git clone --branch "${REF}" "${REPO_URL}" "${INSTALL_DIR}"
+  git clone "${REPO_URL}" "${INSTALL_DIR}"
+  git -C "${INSTALL_DIR}" fetch --all --tags
+  git -C "${INSTALL_DIR}" checkout "${REF}"
 fi
 
 cd "${INSTALL_DIR}"
