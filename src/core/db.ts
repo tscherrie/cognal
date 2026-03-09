@@ -479,7 +479,7 @@ export class Db {
     await this.run(`UPDATE bindings SET active_agent = ?, updated_at = ? WHERE user_id = ?`, [activeAgent, now, userId]);
   }
 
-  async updateSessionRef(userId: string, agent: AgentType, sessionRef: string): Promise<void> {
+  async updateSessionRef(userId: string, agent: AgentType, sessionRef: string | null): Promise<void> {
     const now = new Date().toISOString();
     if (agent === "claude") {
       await this.run(`UPDATE bindings SET claude_session_ref = ?, updated_at = ? WHERE user_id = ?`, [sessionRef, now, userId]);

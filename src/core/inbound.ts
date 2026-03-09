@@ -9,9 +9,10 @@ import type { InboundAttachment } from "../types.js";
 import type { Db } from "./db.js";
 import { createDiagnosticId, formatProviderUserError } from "./errors.js";
 import { routeTextInput } from "./router.js";
-import { safeFileName, chunkText } from "./utils.js";
+import { safeFileName } from "./utils.js";
 import { stageIncomingAttachment, buildAttachmentSummary } from "./attachments.js";
 import { Logger } from "./logger.js";
+import { chunkTelegramHtml, formatTelegramHtml } from "./telegramFormat.js";
 
 interface RuntimePathsLike {
   tempDir: string;
@@ -166,9 +167,10 @@ export async function processInboundEvent(args: {
   }
 
   await db.insertMessage(user.id, null, event.chatId, "out", responseText);
-  const chunks = chunkText(responseText, cfg.routing.responseChunkSize);
+  const formatted = formatTelegramHtml(responseText);
+  const chunks = chunkTelegramHtml(formatted, cfg.routing.responseChunkSize);
   for (const chunk of chunks) {
-    await chat.sendMessage(event.chatId, chunk);
+    await chat.sendMessage(event.chatId, chunk, { parseMode: "HTML", disableWebPagePreview: true });
   }
 }
 
