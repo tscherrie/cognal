@@ -17,10 +17,15 @@ export interface TelegramBotIdentity {
   username: string;
 }
 
+export interface SendMessageOptions {
+  parseMode?: "HTML";
+  disableWebPagePreview?: boolean;
+}
+
 export interface ChatAdapter {
   getIdentity(): Promise<TelegramBotIdentity>;
   receive(timeoutSec: number): Promise<InboundChatEvent[]>;
-  sendMessage(chatId: string, text: string): Promise<void>;
+  sendMessage(chatId: string, text: string, options?: SendMessageOptions): Promise<void>;
   sendTyping(chatId: string): Promise<void>;
   downloadAttachment(fileId: string, targetPath: string): Promise<void>;
 }

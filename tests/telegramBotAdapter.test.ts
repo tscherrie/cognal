@@ -136,8 +136,11 @@ describe("TelegramBotAdapter", () => {
       .mockResolvedValueOnce(mockJsonResponse({ ok: true, result: true }));
 
     const adapter = new TelegramBotAdapter("TOKEN", statePath, "mybot");
-    await adapter.sendMessage("123", "hello");
+    await adapter.sendMessage("123", "hello", { parseMode: "HTML", disableWebPagePreview: true });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body ?? "{}"));
+    expect(body.parse_mode).toBe("HTML");
+    expect(body.disable_web_page_preview).toBe(true);
   });
 });

@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { ChatAdapter, InboundAttachmentDescriptor, InboundChatEvent, TelegramBotIdentity } from "./chatAdapter.js";
+import type { ChatAdapter, InboundAttachmentDescriptor, InboundChatEvent, SendMessageOptions, TelegramBotIdentity } from "./chatAdapter.js";
 import { classifyTelegramError } from "../core/errors.js";
 import { retryAsync } from "../core/utils.js";
 
@@ -229,12 +229,14 @@ export class TelegramBotAdapter implements ChatAdapter {
     return events;
   }
 
-  async sendMessage(chatId: string, text: string): Promise<void> {
+  async sendMessage(chatId: string, text: string, options: SendMessageOptions = {}): Promise<void> {
     await this.callApi(
       "sendMessage",
       {
         chat_id: chatId,
-        text
+        text,
+        ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
+        ...(options.disableWebPagePreview ? { disable_web_page_preview: true } : {})
       },
       { attempts: 3, baseDelayMs: 500, maxDelayMs: 4_000 }
     );

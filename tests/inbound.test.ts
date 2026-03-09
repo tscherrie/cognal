@@ -73,12 +73,12 @@ class FakeManager {
 }
 
 class FakeChat {
-  sent: Array<{ chatId: string; text: string }> = [];
+  sent: Array<{ chatId: string; text: string; options?: { parseMode?: "HTML"; disableWebPagePreview?: boolean } }> = [];
   typing: string[] = [];
   downloadBodies = new Map<string, string>();
 
-  async sendMessage(chatId: string, text: string): Promise<void> {
-    this.sent.push({ chatId, text });
+  async sendMessage(chatId: string, text: string, options?: { parseMode?: "HTML"; disableWebPagePreview?: boolean }): Promise<void> {
+    this.sent.push({ chatId, text, options });
   }
 
   async sendTyping(chatId: string): Promise<void> {
@@ -292,10 +292,36 @@ describe("processInboundEvent", () => {
       isAgentEnabled: () => true
     });
 
-    const combined = chat.sent.map((item) => item.text).join("");
-    expect(combined).toContain("rate-limited");
-    expect(combined).toMatch(/Error ID: [a-z0-9]+/i);
+    const combined = chat.sent.map((item) => item.text).join("\n");
+    const squashed = combined.replace(/\s+/g, "");
+    expect(squashed.toLowerCase()).toContain("rate-limited".replace(/\s+/g, ""));
+    expect(squashed).toMatch(/ErrorID:[a-z0-9]+/i);
     expect(combined).not.toContain("429 rate limit exceeded");
+  });
+
+  it("formats agent output as Telegram HTML before sending", async () => {
+    const db = new FakeDb();
+    const chat = new FakeChat();
+    const manager = new FakeManager();
+    manager.responseText = ["**Projektziel**", "", "Das steht in [README.md](/tmp/README.md)."].join("\n");
+
+    await processInboundEvent({
+      event: makeEvent(),
+      db: db as any,
+      manager: manager as any,
+      chat: chat as any,
+      stt: null,
+      cfg: makeConfig() as any,
+      paths: { tempDir: path.join(os.tmpdir(), `cognal-inbound-${Date.now()}`) },
+      botUsername: "mybot",
+      logger: new Logger("test"),
+      isAgentEnabled: () => true
+    });
+
+    const combined = chat.sent.map((item) => item.text).join("");
+    expect(combined).toContain("<b>Projektziel</b>");
+    expect(combined).toContain("<code>README.md</code>");
+    expect(chat.sent[0]?.options).toEqual({ parseMode: "HTML", disableWebPagePreview: true });
   });
 });
 
