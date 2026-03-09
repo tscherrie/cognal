@@ -2,6 +2,8 @@
 
 Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Telegram chats to Claude Code or Codex.
 
+Current release line: `v0.2.0`
+
 ## Key behavior
 
 - Multi-project capable on one server (project-scoped `systemd` service per project).
@@ -193,3 +195,10 @@ npm test
 - `cognal doctor` validates Telegram token health and also runs provider smoke checks for enabled Claude/Codex CLIs.
 - If provider resume fails after updates, Cognal retries with a fresh session.
 - Codex session continuation depends on the installed Codex CLI version. Cognal probes support and degrades safely when resume is unavailable.
+
+## Troubleshooting
+
+- `Telegram API getUpdates failed (409)` usually means a second poller is running with the same bot token. Stop the duplicate `cognald` instance and restart the intended project service.
+- `TypeError: fetch failed` in daemon logs is typically a transient network failure. Cognal now backs off automatically up to 30 seconds instead of tight-looping.
+- `provider:claude` or `provider:codex` failing in `cognal doctor` means the binary exists but cannot complete a real prompt. Re-run `cognal setup` or verify API credentials in `./.cognal/cognald.env`.
+- If Codex works in a shell but not in Cognal, run `cognal setup` again so Cognal can refresh `codex login --with-api-key` state.

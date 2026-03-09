@@ -15,6 +15,8 @@ import { AgentManager } from "./agents/manager.js";
 import type { AgentType } from "./types.js";
 
 const logger = new Logger("daemon");
+const LOOP_ERROR_BACKOFF_BASE_MS = 1_000;
+const LOOP_ERROR_BACKOFF_MAX_MS = 30_000;
 
 interface BotLock {
   lockPath: string;
@@ -183,6 +185,7 @@ async function main(): Promise<void> {
   });
 
   logger.info("cognald started", { projectRoot, botUsername: identity.username });
+  let consecutiveLoopErrors = 0;
 
   while (running) {
     try {
@@ -191,9 +194,12 @@ async function main(): Promise<void> {
         await processInboundEvent({ event, db, manager, chat, stt, cfg, paths, botUsername: identity.username, logger, isAgentEnabled });
       }
       await runAttachmentCleanup(db);
+      consecutiveLoopErrors = 0;
     } catch (err) {
-      logger.error("loop error", { error: String(err) });
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      consecutiveLoopErrors += 1;
+      const backoffMs = Math.min(LOOP_ERROR_BACKOFF_BASE_MS * 2 ** Math.min(consecutiveLoopErrors - 1, 5), LOOP_ERROR_BACKOFF_MAX_MS);
+      logger.error("loop error", { error: String(err), consecutiveLoopErrors, backoffMs });
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
     }
   }
 }
