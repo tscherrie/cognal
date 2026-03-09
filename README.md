@@ -2,13 +2,15 @@
 
 Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Telegram chats to Claude Code or Codex.
 
-Current release line: `v0.2.0`
+Current release line: `v0.3.0`
 
-Current `v0.3.0` work in progress:
+`v0.3.0` highlights:
 - API-key-only setup
 - Telegram group mode: `all` or `mentions_only`
 - Telegram typing indicator during agent processing
 - Attachment size limits with user-facing rejection messages
+- Classified retries for Telegram, STT, and transient provider failures
+- User-facing diagnostic error IDs for failed agent runs
 - `cognal status --json`
 - `cognal doctor --verbose`
 - `cognal config get/set`
@@ -210,11 +212,14 @@ npm test
 - `cognal doctor` validates Telegram token health and also runs provider smoke checks for enabled Claude/Codex CLIs.
 - `cognal doctor --verbose` prints full failure details.
 - If provider resume fails after updates, Cognal retries with a fresh session.
+- Failed user-visible agent runs return a short `Error ID` that can be correlated with daemon logs.
 - Codex session continuation depends on the installed Codex CLI version. Cognal probes support and degrades safely when resume is unavailable.
 
 ## Troubleshooting
 
 - `Telegram API getUpdates failed (409)` usually means a second poller is running with the same bot token. Stop the duplicate `cognald` instance and restart the intended project service.
 - `TypeError: fetch failed` in daemon logs is typically a transient network failure. Cognal now backs off automatically up to 30 seconds instead of tight-looping.
+- Telegram API rate limits and transient file-download failures are retried automatically with backoff.
+- STT and clearly transient provider failures are retried conservatively before Cognal returns an error to the user.
 - `provider:claude` or `provider:codex` failing in `cognal doctor` means the binary exists but cannot complete a real prompt. Re-run `cognal setup` or verify API credentials in `./.cognal/cognald.env`.
 - If Codex works in a shell but not in Cognal, run `cognal setup` again so Cognal can refresh `codex login --with-api-key` state.

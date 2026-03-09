@@ -270,6 +270,33 @@ describe("processInboundEvent", () => {
     expect(chat.sent[0]?.text).toContain("Attachment rejected");
     expect(db.attachments).toHaveLength(0);
   });
+
+  it("returns a diagnostic ID instead of raw provider errors", async () => {
+    const db = new FakeDb();
+    const chat = new FakeChat();
+    const manager = new FakeManager();
+    manager.sendToActive = async () => {
+      throw new Error("429 rate limit exceeded");
+    };
+
+    await processInboundEvent({
+      event: makeEvent(),
+      db: db as any,
+      manager: manager as any,
+      chat: chat as any,
+      stt: null,
+      cfg: makeConfig() as any,
+      paths: { tempDir: path.join(os.tmpdir(), `cognal-inbound-${Date.now()}`) },
+      botUsername: "mybot",
+      logger: new Logger("test"),
+      isAgentEnabled: () => true
+    });
+
+    const combined = chat.sent.map((item) => item.text).join("");
+    expect(combined).toContain("rate-limited");
+    expect(combined).toMatch(/Error ID: [a-z0-9]+/i);
+    expect(combined).not.toContain("429 rate limit exceeded");
+  });
 });
 
 describe("runAttachmentCleanup", () => {

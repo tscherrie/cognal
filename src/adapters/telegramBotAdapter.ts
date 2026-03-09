@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ChatAdapter, InboundAttachmentDescriptor, InboundChatEvent, TelegramBotIdentity } from "./chatAdapter.js";
+import { classifyTelegramError } from "../core/errors.js";
+import { retryAsync } from "../core/utils.js";
 
 interface TelegramApiResponse<T> {
   ok: boolean;
@@ -164,11 +166,15 @@ export class TelegramBotAdapter implements ChatAdapter {
   async receive(timeoutSec: number): Promise<InboundChatEvent[]> {
     await this.ensureOffsetLoaded();
     const identity = await this.getIdentity();
-    const updates = await this.callApi<TelegramUpdate[]>("getUpdates", {
-      timeout: timeoutSec,
-      offset: this.offset,
-      allowed_updates: ["message"]
-    });
+    const updates = await this.callApi<TelegramUpdate[]>(
+      "getUpdates",
+      {
+        timeout: timeoutSec,
+        offset: this.offset,
+        allowed_updates: ["message"]
+      },
+      { attempts: 4, baseDelayMs: 1_000, maxDelayMs: 8_000 }
+    );
 
     if (!Array.isArray(updates) || updates.length === 0) {
       return [];
@@ -224,50 +230,83 @@ export class TelegramBotAdapter implements ChatAdapter {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
-    await this.callApi("sendMessage", {
-      chat_id: chatId,
-      text
-    });
+    await this.callApi(
+      "sendMessage",
+      {
+        chat_id: chatId,
+        text
+      },
+      { attempts: 3, baseDelayMs: 500, maxDelayMs: 4_000 }
+    );
   }
 
   async sendTyping(chatId: string): Promise<void> {
-    await this.callApi("sendChatAction", {
-      chat_id: chatId,
-      action: "typing"
-    });
+    await this.callApi(
+      "sendChatAction",
+      {
+        chat_id: chatId,
+        action: "typing"
+      },
+      { attempts: 2, baseDelayMs: 300, maxDelayMs: 2_000 }
+    );
   }
 
   async downloadAttachment(fileId: string, targetPath: string): Promise<void> {
-    const file = await this.callApi<TelegramGetFileResult>("getFile", { file_id: fileId });
+    const file = await this.callApi<TelegramGetFileResult>("getFile", { file_id: fileId }, { attempts: 3, baseDelayMs: 500, maxDelayMs: 4_000 });
     if (!file.file_path) {
       throw new Error(`Telegram getFile returned no file_path for file_id ${fileId}`);
     }
-    const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${file.file_path}`);
-    if (!response.ok) {
-      throw new Error(`Telegram file download failed (${response.status})`);
-    }
-    const buf = Buffer.from(await response.arrayBuffer());
+    const buf = await retryAsync(
+      async () => {
+        const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${file.file_path}`);
+        if (!response.ok) {
+          const detail = (await response.text()).trim();
+          throw new Error(`Telegram file download failed (${response.status})${detail ? `: ${detail}` : ""}`);
+        }
+        return Buffer.from(await response.arrayBuffer());
+      },
+      {
+        attempts: 3,
+        baseDelayMs: 500,
+        maxDelayMs: 4_000,
+        classifyError: classifyTelegramError
+      }
+    );
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
     await fs.writeFile(targetPath, buf);
   }
 
-  private async callApi<T>(method: string, payload: Record<string, unknown>): Promise<T> {
-    const response = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
+  private async callApi<T>(
+    method: string,
+    payload: Record<string, unknown>,
+    retry: { attempts: number; baseDelayMs: number; maxDelayMs?: number } = { attempts: 1, baseDelayMs: 0 }
+  ): Promise<T> {
+    return await retryAsync(
+      async () => {
+        const response = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+          const detail = (await response.text()).trim();
+          throw new Error(`Telegram API ${method} failed (${response.status})${detail ? `: ${detail}` : ""}`);
+        }
+        const json = (await response.json()) as TelegramApiResponse<T>;
+        if (!json.ok || json.result === undefined) {
+          throw new Error(`Telegram API ${method} error: ${json.description ?? "unknown error"}`);
+        }
+        return json.result;
       },
-      body: JSON.stringify(payload)
-    });
-    if (!response.ok) {
-      const detail = (await response.text()).trim();
-      throw new Error(`Telegram API ${method} failed (${response.status})${detail ? `: ${detail}` : ""}`);
-    }
-    const json = (await response.json()) as TelegramApiResponse<T>;
-    if (!json.ok || json.result === undefined) {
-      throw new Error(`Telegram API ${method} error: ${json.description ?? "unknown error"}`);
-    }
-    return json.result;
+      {
+        attempts: retry.attempts,
+        baseDelayMs: retry.baseDelayMs,
+        maxDelayMs: retry.maxDelayMs,
+        classifyError: classifyTelegramError
+      }
+    );
   }
 
   private async ensureOffsetLoaded(): Promise<void> {

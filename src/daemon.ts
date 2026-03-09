@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { loadOrCreateConfig, getRuntimePaths, ensureRuntimeDirs, getDefaultAgent, getEnabledAgents, isAgentEnabled } from "./config.js";
 import { Db } from "./core/db.js";
+import { classifyTelegramError, createDiagnosticId } from "./core/errors.js";
 import { Logger } from "./core/logger.js";
 import { processInboundEvent, runAttachmentCleanup } from "./core/inbound.js";
 import { TelegramBotAdapter } from "./adapters/telegramBotAdapter.js";
@@ -198,7 +199,15 @@ async function main(): Promise<void> {
     } catch (err) {
       consecutiveLoopErrors += 1;
       const backoffMs = Math.min(LOOP_ERROR_BACKOFF_BASE_MS * 2 ** Math.min(consecutiveLoopErrors - 1, 5), LOOP_ERROR_BACKOFF_MAX_MS);
-      logger.error("loop error", { error: String(err), consecutiveLoopErrors, backoffMs });
+      const classified = classifyTelegramError(err);
+      const diagnosticId = createDiagnosticId();
+      logger.error("loop error", {
+        error: String(err),
+        category: classified.category,
+        diagnosticId,
+        consecutiveLoopErrors,
+        backoffMs
+      });
       await new Promise((resolve) => setTimeout(resolve, backoffMs));
     }
   }

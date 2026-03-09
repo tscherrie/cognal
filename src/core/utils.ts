@@ -9,6 +9,25 @@ export interface CommandResult {
   stderr: string;
 }
 
+export interface RetryDecision {
+  retryable: boolean;
+  retryAfterMs?: number;
+  category?: string;
+}
+
+export interface RetryOptions {
+  attempts: number;
+  baseDelayMs: number;
+  maxDelayMs?: number;
+  classifyError: (error: unknown) => RetryDecision;
+  onRetry?: (details: {
+    attempt: number;
+    delayMs: number;
+    error: unknown;
+    category?: string;
+  }) => void | Promise<void>;
+}
+
 export function runCommand(
   cmd: string,
   args: string[],
@@ -82,6 +101,33 @@ export function runCommand(
       resolve({ code: -1, stdout, stderr: `${stderr}\n${err.message}` });
     });
   });
+}
+
+export async function retryAsync<T>(operation: () => Promise<T>, options: RetryOptions): Promise<T> {
+  const maxAttempts = Math.max(1, options.attempts);
+  let attempt = 1;
+  while (true) {
+    try {
+      return await operation();
+    } catch (error) {
+      const classification = options.classifyError(error);
+      if (!classification.retryable || attempt >= maxAttempts) {
+        throw error;
+      }
+      const backoffMs = Math.min(
+        classification.retryAfterMs ?? options.baseDelayMs * 2 ** (attempt - 1),
+        options.maxDelayMs ?? Number.MAX_SAFE_INTEGER
+      );
+      await options.onRetry?.({
+        attempt,
+        delayMs: backoffMs,
+        error,
+        category: classification.category
+      });
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      attempt += 1;
+    }
+  }
 }
 
 export function runInteractiveCommand(

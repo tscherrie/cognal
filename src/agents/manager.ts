@@ -1,5 +1,7 @@
 import { Logger } from "../core/logger.js";
+import { classifyProviderError } from "../core/errors.js";
 import { otherAgent } from "../core/router.js";
+import { retryAsync } from "../core/utils.js";
 import type { Db } from "../core/db.js";
 import type { AgentOutput, AgentType } from "../types.js";
 import type { AgentAdapter, RunningAgent } from "./agentAdapter.js";
@@ -54,12 +56,7 @@ export class AgentManager {
     const runtime = await this.ensureRuntime(userId, activeAgent, binding);
 
     try {
-      const output = await this.requireAdapter(runtime.agent).send(
-        runtime,
-        input,
-        this.options.agentIdleMs,
-        this.options.agentResponseSec * 1000
-      );
+      const output = await this.sendWithRetry(runtime, input);
       if (output.sessionRef) {
         await this.db.updateSessionRef(userId, runtime.agent, output.sessionRef);
       }
@@ -90,12 +87,7 @@ export class AgentManager {
         input
       ].join("\n\n");
 
-      const output = await this.requireAdapter(fallbackRuntime.agent).send(
-        fallbackRuntime,
-        handoffInput,
-        this.options.agentIdleMs,
-        this.options.agentResponseSec * 1000
-      );
+      const output = await this.sendWithRetry(fallbackRuntime, handoffInput);
       if (output.sessionRef) {
         await this.db.updateSessionRef(userId, fallbackRuntime.agent, output.sessionRef);
       }
@@ -182,5 +174,29 @@ export class AgentManager {
       return agent;
     }
     return this.options.defaultAgent;
+  }
+
+  private async sendWithRetry(runtime: RunningAgent, input: string): Promise<AgentOutput> {
+    const adapter = this.requireAdapter(runtime.agent);
+    return await retryAsync(
+      async () =>
+        await adapter.send(runtime, input, this.options.agentIdleMs, this.options.agentResponseSec * 1000),
+      {
+        attempts: 2,
+        baseDelayMs: 1_500,
+        maxDelayMs: 5_000,
+        classifyError: classifyProviderError,
+        onRetry: async ({ attempt, delayMs, error, category }) => {
+          this.logger.warn("retrying agent send", {
+            userId: runtime.userId,
+            agent: runtime.agent,
+            attempt,
+            delayMs,
+            category,
+            error: String(error)
+          });
+        }
+      }
+    );
   }
 }

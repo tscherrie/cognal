@@ -59,13 +59,18 @@ class FakeAdapter implements AgentAdapter {
   stops = 0;
   sends = 0;
   startOptions: AgentStartOptions[] = [];
+  sendFailuresRemaining: number;
 
   constructor(public readonly type: AgentType, private readonly behavior: {
     failStart?: boolean;
     failSend?: boolean;
+    failSendCount?: number;
+    failSendMessage?: string;
     sendText?: string;
     sessionRef?: string | null;
-  } = {}) {}
+  } = {}) {
+    this.sendFailuresRemaining = behavior.failSendCount ?? 0;
+  }
 
   async start(options: AgentStartOptions): Promise<RunningAgent> {
     this.starts += 1;
@@ -81,8 +86,12 @@ class FakeAdapter implements AgentAdapter {
 
   async send(_runtime: RunningAgent, _input: string): Promise<{ text: string; sessionRef?: string | null }> {
     this.sends += 1;
+    if (this.sendFailuresRemaining > 0) {
+      this.sendFailuresRemaining -= 1;
+      throw new Error(this.behavior.failSendMessage ?? `fetch failed ${this.type}`);
+    }
     if (this.behavior.failSend) {
-      throw new Error(`send failure ${this.type}`);
+      throw new Error(this.behavior.failSendMessage ?? `send failure ${this.type}`);
     }
     return {
       text: this.behavior.sendText ?? `${this.type}-ok`,
@@ -135,6 +144,22 @@ describe("AgentManager", () => {
     expect(output.text).toContain("Failover -> claude");
     expect(output.text).toContain("fallback-response");
     expect(db.binding.activeAgent).toBe("claude");
+  });
+
+  it("retries active agent once for transient provider errors", async () => {
+    const db = new FakeDb();
+    db.binding.activeAgent = "codex";
+    const codex = new FakeAdapter("codex", { failSendCount: 1, failSendMessage: "fetch failed" });
+    const manager = new AgentManager(
+      db as any,
+      { codex },
+      { failoverEnabled: false, agentResponseSec: 10, agentIdleMs: 10, defaultAgent: "codex" }
+    );
+
+    const output = await manager.sendToActive("u1", "hello");
+
+    expect(output.text).toBe("codex-ok");
+    expect(codex.sends).toBe(2);
   });
 
   it("starts with persisted session refs when switching back", async () => {

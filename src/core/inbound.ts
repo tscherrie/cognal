@@ -7,6 +7,7 @@ import type { SttAdapter } from "../adapters/sttAdapter.js";
 import type { AgentManager } from "../agents/manager.js";
 import type { InboundAttachment } from "../types.js";
 import type { Db } from "./db.js";
+import { createDiagnosticId, formatProviderUserError } from "./errors.js";
 import { routeTextInput } from "./router.js";
 import { safeFileName, chunkText } from "./utils.js";
 import { stageIncomingAttachment, buildAttachmentSummary } from "./attachments.js";
@@ -151,8 +152,13 @@ export async function processInboundEvent(args: {
     const output = await manager.sendToActive(user.id, finalPrompt);
     responseText = output.text || "(No textual response from agent.)";
   } catch (err) {
-    logger.error("agent send failed", { userId: user.id, error: String(err) });
-    responseText = `Agent execution failed: ${String(err)}`;
+    const diagnosticId = createDiagnosticId();
+    logger.error("agent send failed", {
+      userId: user.id,
+      error: String(err),
+      diagnosticId
+    });
+    responseText = formatProviderUserError(err, diagnosticId);
   } finally {
     if (typingTimer) {
       clearInterval(typingTimer);

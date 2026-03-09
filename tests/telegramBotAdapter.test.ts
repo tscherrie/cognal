@@ -120,4 +120,24 @@ describe("TelegramBotAdapter", () => {
 
     await fs.unlink(outPath);
   });
+
+  it("retries transient Telegram send failures", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: false,
+            error_code: 429,
+            description: "Too Many Requests: retry after 1"
+          }),
+          { status: 429, headers: { "content-type": "application/json" } }
+        )
+      )
+      .mockResolvedValueOnce(mockJsonResponse({ ok: true, result: true }));
+
+    const adapter = new TelegramBotAdapter("TOKEN", statePath, "mybot");
+    await adapter.sendMessage("123", "hello");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
