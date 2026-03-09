@@ -98,6 +98,17 @@ export class AgentManager {
     }
   }
 
+  async clearAgentSession(userId: string, agent: AgentType): Promise<void> {
+    const runtime = this.runtimes.get(userId);
+    if (runtime && runtime.agent === agent) {
+      await this.stopRuntime(runtime);
+      this.runtimes.delete(userId);
+    }
+    await this.db.updateSessionRef(userId, agent, null);
+    await this.db.clearRuntimePid(userId, agent);
+    this.logger.info("cleared agent session", { userId, agent });
+  }
+
   async shutdownAll(): Promise<void> {
     const entries = [...this.runtimes.values()];
     for (const runtime of entries) {

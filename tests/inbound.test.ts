@@ -24,6 +24,13 @@ class FakeDb {
   attachments: InboundAttachment[] = [];
   deletedPaths: string[] = [];
   expiredPaths: string[] = [];
+  binding = {
+    userId: "u1",
+    activeAgent: "codex" as AgentType,
+    claudeSessionRef: "claude-session",
+    codexSessionRef: "codex-session",
+    updatedAt: new Date().toISOString()
+  };
 
   async getUserByTelegramUserId(): Promise<UserRecord | null> {
     return this.user;
@@ -48,6 +55,10 @@ class FakeDb {
     this.attachments.push(data);
   }
 
+  async getBinding(): Promise<typeof this.binding> {
+    return this.binding;
+  }
+
   async listExpiredAttachmentPaths(): Promise<string[]> {
     return [...this.expiredPaths];
   }
@@ -60,6 +71,7 @@ class FakeDb {
 class FakeManager {
   switched: AgentType[] = [];
   prompts: string[] = [];
+  cleared: AgentType[] = [];
   responseText = "agent-ok";
 
   async switchAgent(_userId: string, agent: AgentType): Promise<void> {
@@ -69,6 +81,10 @@ class FakeManager {
   async sendToActive(_userId: string, input: string): Promise<{ text: string }> {
     this.prompts.push(input);
     return { text: this.responseText };
+  }
+
+  async clearAgentSession(_userId: string, agent: AgentType): Promise<void> {
+    this.cleared.push(agent);
   }
 }
 
@@ -192,6 +208,30 @@ describe("processInboundEvent", () => {
     });
 
     expect(chat.sent[0]?.text).toContain("This chat is not allowed");
+  });
+
+  it("clears the active Claude session locally for /clear", async () => {
+    const db = new FakeDb();
+    db.binding.activeAgent = "claude";
+    const manager = new FakeManager();
+    const chat = new FakeChat();
+
+    await processInboundEvent({
+      event: makeEvent({ text: "/clear", isCommand: true }),
+      db: db as any,
+      manager: manager as any,
+      chat: chat as any,
+      stt: null,
+      cfg: makeConfig() as any,
+      paths: { tempDir: path.join(os.tmpdir(), `cognal-inbound-${Date.now()}`) },
+      botUsername: "mybot",
+      logger: new Logger("test"),
+      isAgentEnabled: () => true
+    });
+
+    expect(manager.cleared).toEqual(["claude"]);
+    expect(manager.prompts).toEqual([]);
+    expect(chat.sent[0]?.text).toBe("Cleared active Claude session.");
   });
 
   it("stages audio, appends transcription failures, and chunks the response", async () => {

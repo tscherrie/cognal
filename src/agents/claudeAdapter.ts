@@ -26,6 +26,7 @@ export class ClaudeAdapter implements AgentAdapter {
     let timedOut = false;
 
     let finalText = "";
+    const localCommandOutputs: string[] = [];
     let finalSessionRef: string | null = runtime.sessionRef ?? sessionRef;
     let resultError = "";
     const runner = query({
@@ -53,6 +54,21 @@ export class ClaudeAdapter implements AgentAdapter {
         if (typeof message === "object" && message && "session_id" in message && typeof message.session_id === "string") {
           finalSessionRef = message.session_id;
         }
+        if (
+          typeof message === "object" &&
+          message &&
+          "type" in message &&
+          message.type === "system" &&
+          "subtype" in message &&
+          message.subtype === "local_command_output" &&
+          "content" in message &&
+          typeof message.content === "string"
+        ) {
+          const content = message.content.trim();
+          if (content) {
+            localCommandOutputs.push(content);
+          }
+        }
         if (typeof message === "object" && message && "type" in message && message.type === "result") {
           if ("subtype" in message && message.subtype === "success" && typeof message.result === "string") {
             finalText = message.result.trim();
@@ -78,6 +94,9 @@ export class ClaudeAdapter implements AgentAdapter {
     }
     if (resultError) {
       throw new Error(`claude sdk query failed: ${resultError}`);
+    }
+    if (!finalText && localCommandOutputs.length > 0) {
+      finalText = localCommandOutputs.join("\n\n");
     }
     if (!finalText) {
       throw new Error("No output from claude");

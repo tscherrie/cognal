@@ -111,6 +111,16 @@ export async function processInboundEvent(args: {
     return;
   }
 
+  if (route.type === "passthrough" && route.payload.trim() === "/clear") {
+    const defaultAgent = cfg.agents.enabled.codex ? "codex" : "claude";
+    const binding = await db.getBinding(user.id, defaultAgent);
+    if (binding.activeAgent === "claude") {
+      await manager.clearAgentSession(user.id, "claude");
+      await chat.sendMessage(event.chatId, "Cleared active Claude session.");
+      return;
+    }
+  }
+
   const parts: string[] = [];
   const inboundText = route.payload.trim();
   if (inboundText) {
