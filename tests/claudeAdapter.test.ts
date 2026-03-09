@@ -41,4 +41,33 @@ describe("ClaudeAdapter", () => {
     expect(output.text).toBe("Error: No messages to compact");
     expect(output.sessionRef).toBe("s1");
   });
+
+  it("falls back to a success message for empty slash-command results", async () => {
+    const iterator = (async function* () {
+      yield {
+        type: "system",
+        subtype: "status",
+        session_id: "s2"
+      };
+      yield {
+        type: "result",
+        subtype: "success",
+        result: "",
+        session_id: "s2"
+      };
+    })();
+    queryMock.mockReturnValue({
+      [Symbol.asyncIterator]() {
+        return iterator;
+      },
+      close() {}
+    });
+
+    const adapter = new ClaudeAdapter("claude");
+    const runtime = await adapter.start({ userId: "u1", sessionRef: "resume-id", fresh: false });
+    const output = await adapter.send(runtime, "/compact", 0, 1_000);
+
+    expect(output.text).toBe("Compacted Claude session.");
+    expect(output.sessionRef).toBe("s2");
+  });
 });

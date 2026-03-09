@@ -98,6 +98,9 @@ export class ClaudeAdapter implements AgentAdapter {
     if (!finalText && localCommandOutputs.length > 0) {
       finalText = localCommandOutputs.join("\n\n");
     }
+    if (!finalText && trimmedInput.startsWith("/")) {
+      finalText = this.fallbackSlashCommandText(trimmedInput);
+    }
     if (!finalText) {
       throw new Error("No output from claude");
     }
@@ -115,5 +118,17 @@ export class ClaudeAdapter implements AgentAdapter {
   async stop(runtime: RunningAgent): Promise<string | null> {
     runtime.process.kill("SIGTERM");
     return runtime.sessionRef;
+  }
+
+  private fallbackSlashCommandText(input: string): string {
+    const command = input.trim().split(/\s+/, 1)[0]?.toLowerCase() || "";
+    switch (command) {
+      case "/compact":
+        return "Compacted Claude session.";
+      case "/context":
+        return "Updated Claude session context.";
+      default:
+        return `Executed Claude command: ${command}`;
+    }
   }
 }
