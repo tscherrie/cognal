@@ -37,6 +37,8 @@ export function runCommand(
     if (options.stdin) {
       proc.stdin.write(options.stdin);
       proc.stdin.end();
+    } else {
+      proc.stdin.end();
     }
 
     let timedOut = false;
