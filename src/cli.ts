@@ -15,9 +15,10 @@ import {
   enabledFromProviderSelection,
   providerSelectionFromEnabled,
   getDefaultAgent,
-  isAgentEnabled
+  isAgentEnabled,
+  attachmentLimitBytes
 } from "./config.js";
-import type { CognalConfig, ProviderSelection } from "./config.js";
+import type { CognalConfig, ProviderSelection, TelegramGroupMode } from "./config.js";
 import { Db } from "./core/db.js";
 import { commandExists, runCommand, runInteractiveCommand, resolveCommandPath } from "./core/utils.js";
 import { Logger } from "./core/logger.js";
@@ -34,12 +35,9 @@ interface ProviderRuntimeSpec {
   label: "Claude" | "Codex";
   command: string;
   installPackage: string;
-  setupArgs: string[];
   apiKeyEnv: string;
   apiKeyUrl: string;
 }
-
-type ProviderAuthMode = "api_key" | "auth_login";
 
 function parseProviderSelection(value: string): ProviderSelection {
   const normalized = value.trim().toLowerCase();
@@ -77,6 +75,34 @@ async function promptProviderSelection(defaultSelection: ProviderSelection): Pro
   } finally {
     rl.close();
   }
+}
+
+function printSetupStep(step: number, title: string, detail?: string): void {
+  process.stdout.write(`\n[Step ${step}] ${title}\n`);
+  if (detail) {
+    process.stdout.write(`${detail}\n`);
+  }
+}
+
+async function promptChoice<T extends string>(question: string, options: Array<{ value: T; label: string }>, defaultValue: T): Promise<T> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return defaultValue;
+  }
+  process.stdout.write(`${question}\n`);
+  for (let idx = 0; idx < options.length; idx += 1) {
+    const option = options[idx];
+    process.stdout.write(`  ${idx + 1}) ${option.label}\n`);
+  }
+  const answer = (await promptText(`Selection [${defaultValue}]`)).trim().toLowerCase();
+  if (!answer) {
+    return defaultValue;
+  }
+  const numeric = Number(answer);
+  if (Number.isInteger(numeric) && numeric >= 1 && numeric <= options.length) {
+    return options[numeric - 1].value;
+  }
+  const match = options.find((option) => option.value === answer);
+  return match?.value ?? defaultValue;
 }
 
 async function promptYesNo(question: string, defaultYes: boolean): Promise<boolean> {
@@ -118,6 +144,30 @@ async function promptText(question: string, defaultValue = ""): Promise<string> 
 
 function resolveProjectRoot(input?: string): string {
   return input ? path.resolve(input) : process.cwd();
+}
+
+function resolveProjectRootFromCommand(cmd: { opts?: () => Record<string, unknown>; parent?: unknown }): string {
+  let current: unknown = cmd;
+  while (current && typeof current === "object") {
+    const commandLike = current as { opts?: () => Record<string, unknown>; parent?: unknown };
+    if (typeof commandLike.opts === "function") {
+      const options = commandLike.opts();
+      if (typeof options.projectRoot === "string" && options.projectRoot.trim()) {
+        return resolveProjectRoot(options.projectRoot);
+      }
+    }
+    current = commandLike.parent;
+  }
+  for (let idx = 0; idx < process.argv.length; idx += 1) {
+    const token = process.argv[idx];
+    if ((token === "-p" || token === "--project-root") && process.argv[idx + 1]) {
+      return resolveProjectRoot(process.argv[idx + 1]);
+    }
+    if (token.startsWith("--project-root=")) {
+      return resolveProjectRoot(token.slice("--project-root=".length));
+    }
+  }
+  return resolveProjectRoot();
 }
 
 function validateTelegramUserId(value: string): string {
@@ -236,32 +286,6 @@ async function removeDaemonEnvKeys(envPath: string, keys: string[]): Promise<voi
   await writeDaemonEnv(envPath, env);
 }
 
-function parseProviderAuthMode(value: string): ProviderAuthMode {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "1" || normalized === "api" || normalized === "api_key" || normalized === "api-key") {
-    return "api_key";
-  }
-  if (normalized === "2" || normalized === "auth" || normalized === "auth_login" || normalized === "auth-login") {
-    return "auth_login";
-  }
-  throw new Error(`Unknown auth mode '${value}'. Use: api_key or auth_login`);
-}
-
-async function promptProviderAuthMode(spec: ProviderRuntimeSpec): Promise<ProviderAuthMode> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    return process.env[spec.apiKeyEnv]?.trim() ? "api_key" : "auth_login";
-  }
-
-  process.stdout.write(`Choose ${spec.label} auth mode:\n`);
-  process.stdout.write("  1) api_key (recommended for servers)\n");
-  process.stdout.write("  2) auth_login (browser OAuth)\n");
-  const answer = await promptText(`Auth mode for ${spec.label} [api_key]`);
-  if (!answer.trim()) {
-    return "api_key";
-  }
-  return parseProviderAuthMode(answer);
-}
-
 async function openDb(projectRoot: string): Promise<{ db: Db; paths: ReturnType<typeof getRuntimePaths> }> {
   const paths = getRuntimePaths(projectRoot);
   await ensureRuntimeDirs(paths);
@@ -376,7 +400,6 @@ function enabledProviderSpecs(cfg: CognalConfig): ProviderRuntimeSpec[] {
       label: "Claude",
       command: cfg.agents.claude.command,
       installPackage: "@anthropic-ai/claude-code@latest",
-      setupArgs: ["auth", "login"],
       apiKeyEnv: "ANTHROPIC_API_KEY",
       apiKeyUrl: "https://console.anthropic.com/settings/keys"
     });
@@ -386,7 +409,6 @@ function enabledProviderSpecs(cfg: CognalConfig): ProviderRuntimeSpec[] {
       label: "Codex",
       command: cfg.agents.codex.command,
       installPackage: "@openai/codex@latest",
-      setupArgs: ["login"],
       apiKeyEnv: "OPENAI_API_KEY",
       apiKeyUrl: "https://platform.openai.com/api-keys"
     });
@@ -430,18 +452,6 @@ async function configureCodexApiKeyLogin(command: string, apiKey: string): Promi
   if (result.code !== 0) {
     const detail = (result.stderr || result.stdout || "unknown error").trim();
     throw new Error(`codex login --with-api-key failed: ${detail}`);
-  }
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-async function runProviderSetupWithArgs(command: string, args: string[]): Promise<void> {
-  const fullCommand = [command, ...args].map(shellQuote).join(" ");
-  const code = await runInteractiveCommand("bash", ["-lc", fullCommand]);
-  if (code !== 0) {
-    throw new Error(`${command} ${args.join(" ")} exited with code ${code}`);
   }
 }
 
@@ -592,6 +602,122 @@ async function doctorChecks(projectRoot: string, cfg: CognalConfig): Promise<Hea
   return checks;
 }
 
+function formatBytes(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1024) {
+    return `${(mb / 1024).toFixed(1)} GB`;
+  }
+  return `${Math.round(mb)} MB`;
+}
+
+async function promptTelegramGroupMode(defaultMode: TelegramGroupMode): Promise<TelegramGroupMode> {
+  return await promptChoice(
+    "Telegram group mode",
+    [
+      { value: "all", label: "all (process every message in allowed groups)" },
+      { value: "mentions_only", label: "mentions_only (process mentions, commands, replies only)" }
+    ],
+    defaultMode
+  );
+}
+
+async function runSetupWizard(
+  projectRoot: string,
+  cfg: CognalConfig,
+  envPath: string
+): Promise<{
+  providers: ProviderSelection;
+  daemonEnvUpdates: Record<string, string>;
+}> {
+  const daemonEnv = await readDaemonEnv(envPath);
+
+  printSetupStep(1, "Provider Selection");
+  const defaultProviders = providerSelectionFromEnabled(cfg.agents.enabled);
+  const selectedProviders = await promptProviderSelection(defaultProviders);
+  cfg.agents.enabled = enabledFromProviderSelection(selectedProviders);
+
+  printSetupStep(2, "Telegram Bot", "Create a bot with BotFather and paste the token below.");
+  const currentToken = daemonEnv[cfg.telegram.botTokenEnv] || process.env[cfg.telegram.botTokenEnv] || "";
+  if (!currentToken) {
+    printTelegramBotFatherGuide(cfg.telegram.botTokenEnv);
+  }
+  const tokenPrompt = currentToken ? `${cfg.telegram.botTokenEnv} (leave empty to keep current)` : `${cfg.telegram.botTokenEnv}`;
+  const enteredToken = (await promptText(`Telegram bot token ${tokenPrompt}`)).trim();
+  const finalToken = enteredToken || currentToken;
+  if (!finalToken) {
+    throw new Error(`Missing Telegram bot token (${cfg.telegram.botTokenEnv})`);
+  }
+
+  printSetupStep(
+    3,
+    "Group Behavior",
+    "For 'all' mode, disable BotFather privacy for this bot if you want Telegram to deliver full group traffic."
+  );
+  cfg.telegram.allowGroups = await promptYesNo("Enable Telegram group/supergroup chats?", true);
+  cfg.telegram.groupMode = cfg.telegram.allowGroups ? await promptTelegramGroupMode(cfg.telegram.groupMode) : "mentions_only";
+
+  printSetupStep(4, "Provider API Keys", "Only API-key login is supported in v0.3.0.");
+  const providerSpecs = enabledProviderSpecs(cfg);
+  const daemonEnvUpdates: Record<string, string> = {
+    [cfg.telegram.botTokenEnv]: finalToken,
+    COGNAL_PROJECT_ROOT: projectRoot
+  };
+  for (const spec of providerSpecs) {
+    process.stdout.write(`${spec.label} API key URL: ${spec.apiKeyUrl}\n`);
+    const existing = daemonEnv[spec.apiKeyEnv] || process.env[spec.apiKeyEnv]?.trim() || "";
+    const keyPrompt = existing ? `Paste ${spec.apiKeyEnv} (leave empty to keep current value)` : `Paste ${spec.apiKeyEnv}`;
+    const finalKey = (await promptText(keyPrompt)).trim() || existing;
+    if (!finalKey) {
+      throw new Error(`Missing ${spec.apiKeyEnv} for ${spec.label}. API keys are required.`);
+    }
+    daemonEnvUpdates[spec.apiKeyEnv] = finalKey;
+    process.env[spec.apiKeyEnv] = finalKey;
+  }
+
+  return { providers: selectedProviders, daemonEnvUpdates };
+}
+
+function getConfigValue(cfg: CognalConfig, dottedKey: string): unknown {
+  return dottedKey.split(".").reduce<unknown>((current, key) => {
+    if (current && typeof current === "object" && key in (current as Record<string, unknown>)) {
+      return (current as Record<string, unknown>)[key];
+    }
+    throw new Error(`Unknown config key: ${dottedKey}`);
+  }, cfg);
+}
+
+function coerceConfigValue(raw: string): unknown {
+  const trimmed = raw.trim();
+  if (trimmed === "true") {
+    return true;
+  }
+  if (trimmed === "false") {
+    return false;
+  }
+  if (/^-?\d+$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+  return trimmed;
+}
+
+function setConfigValue(cfg: CognalConfig, dottedKey: string, value: unknown): void {
+  const parts = dottedKey.split(".");
+  let current = cfg as unknown as Record<string, unknown>;
+  for (let idx = 0; idx < parts.length - 1; idx += 1) {
+    const key = parts[idx];
+    const next = current[key];
+    if (!next || typeof next !== "object") {
+      throw new Error(`Unknown config key: ${dottedKey}`);
+    }
+    current = next as Record<string, unknown>;
+  }
+  const finalKey = parts[parts.length - 1];
+  if (!(finalKey in current)) {
+    throw new Error(`Unknown config key: ${dottedKey}`);
+  }
+  current[finalKey] = value;
+}
+
 const program = new Command();
 
 program
@@ -602,51 +728,64 @@ program
 
 program
   .command("setup")
-  .option("--run-provider-setup", "Force native Claude/Codex setup flows (also without TTY)", false)
   .option("--skip-provider-install", "Skip automatic install for missing provider CLIs", false)
-  .option("--skip-provider-setup", "Skip native provider login/setup flows", false)
   .option("--distro <ubuntu|debian>", "Set distro in config")
   .option("--providers <claude|codex|both>", "Enabled providers")
   .option("--skip-onboarding", "Skip interactive onboarding", false)
   .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     const { db, paths, cfg } = await getConfigAndDb(projectRoot);
-
-    const defaultProviders = providerSelectionFromEnabled(cfg.agents.enabled);
-    const selectedProviders = opts.providers ? parseProviderSelection(opts.providers) : await promptProviderSelection(defaultProviders);
-    cfg.agents.enabled = enabledFromProviderSelection(selectedProviders);
 
     if (opts.distro) {
       cfg.runtime.distro = opts.distro;
     }
 
+    const envPath = path.join(paths.cognalDir, "cognald.env");
+    let selectedProviders = providerSelectionFromEnabled(cfg.agents.enabled);
+    let daemonEnvUpdates: Record<string, string> = {};
     if (process.stdin.isTTY && process.stdout.isTTY) {
-      cfg.telegram.allowGroups = await promptYesNo("Enable Telegram group/supergroup chats?", true);
+      const wizard = await runSetupWizard(projectRoot, cfg, envPath);
+      selectedProviders = wizard.providers;
+      daemonEnvUpdates = wizard.daemonEnvUpdates;
+    } else {
+      selectedProviders = opts.providers ? parseProviderSelection(opts.providers) : providerSelectionFromEnabled(cfg.agents.enabled);
+      cfg.agents.enabled = enabledFromProviderSelection(selectedProviders);
+      const daemonEnv = await readDaemonEnv(envPath);
+      const finalToken = daemonEnv[cfg.telegram.botTokenEnv] || process.env[cfg.telegram.botTokenEnv] || "";
+      if (!finalToken) {
+        await db.close();
+        throw new Error(`Missing Telegram bot token (${cfg.telegram.botTokenEnv})`);
+      }
+      daemonEnvUpdates = { [cfg.telegram.botTokenEnv]: finalToken, COGNAL_PROJECT_ROOT: projectRoot };
+      for (const spec of enabledProviderSpecs(cfg)) {
+        const finalKey = daemonEnv[spec.apiKeyEnv] || process.env[spec.apiKeyEnv]?.trim() || "";
+        if (!finalKey) {
+          await db.close();
+          throw new Error(`Missing ${spec.apiKeyEnv} for ${spec.label}. API keys are required.`);
+        }
+        daemonEnvUpdates[spec.apiKeyEnv] = finalKey;
+        process.env[spec.apiKeyEnv] = finalKey;
+      }
     }
 
-    const envPath = path.join(paths.cognalDir, "cognald.env");
-    const daemonEnv = await readDaemonEnv(envPath);
-    const currentToken = daemonEnv[cfg.telegram.botTokenEnv] || process.env[cfg.telegram.botTokenEnv] || "";
-    if (process.stdin.isTTY && process.stdout.isTTY && !currentToken) {
-      printTelegramBotFatherGuide(cfg.telegram.botTokenEnv);
-    }
-    const tokenPrompt = currentToken ? `${cfg.telegram.botTokenEnv} (leave empty to keep current)` : `${cfg.telegram.botTokenEnv}`;
-    const enteredToken = (await promptText(`Telegram bot token ${tokenPrompt}`)).trim();
-    const finalToken = enteredToken || currentToken;
-    if (!finalToken) {
-      await db.close();
-      throw new Error(`Missing Telegram bot token (${cfg.telegram.botTokenEnv})`);
-    }
+    cfg.agents.enabled = enabledFromProviderSelection(selectedProviders);
+    const finalToken = daemonEnvUpdates[cfg.telegram.botTokenEnv];
 
     const telegram = new TelegramBotAdapter(finalToken, paths.telegramOffsetPath, cfg.telegram.botUsername);
     const identity = await telegram.getIdentity();
     cfg.telegram.botUsername = identity.username;
 
     await saveConfig(paths, cfg);
-    await upsertDaemonEnv(envPath, { [cfg.telegram.botTokenEnv]: finalToken, COGNAL_PROJECT_ROOT: projectRoot });
+    await upsertDaemonEnv(envPath, daemonEnvUpdates);
 
     process.stdout.write(`Provider mode: ${selectedProviders}\n`);
     process.stdout.write(`Telegram bot: @${identity.username}\n`);
+    process.stdout.write(`Group mode: ${cfg.telegram.allowGroups ? cfg.telegram.groupMode : "disabled"}\n`);
+    process.stdout.write(
+      `Attachment limits: audio ${formatBytes(attachmentLimitBytes(cfg, "audio"))}, image ${formatBytes(
+        attachmentLimitBytes(cfg, "image")
+      )}, document ${formatBytes(attachmentLimitBytes(cfg, "document"))}\n`
+    );
 
     const checks = await doctorChecks(projectRoot, cfg);
     for (const check of checks) {
@@ -654,10 +793,6 @@ program
     }
 
     const providerSpecs = enabledProviderSpecs(cfg);
-    const providerAuthModes = new Map<string, ProviderAuthMode>();
-    const daemonEnvUpdates: Record<string, string> = {
-      [cfg.telegram.botTokenEnv]: finalToken
-    };
 
     if (!opts.skipOnboarding) {
       await runSetupOnboarding(projectRoot, cfg);
@@ -676,66 +811,12 @@ program
     await pinProviderCommandPaths(cfg);
     await saveConfig(paths, cfg);
 
-    let shouldRunProviderSetup = false;
-    if (!opts.skipProviderSetup) {
-      if (opts.runProviderSetup) {
-        shouldRunProviderSetup = true;
-      } else {
-        shouldRunProviderSetup = process.stdin.isTTY && process.stdout.isTTY;
-        if (!shouldRunProviderSetup) {
-          process.stdout.write("[WARN] Non-interactive shell detected. Skipping native provider setup/login. Use --run-provider-setup to force.\n");
-        }
+    for (const spec of providerSpecs) {
+      if (spec.label === "Codex") {
+        await configureCodexApiKeyLogin(spec.command, daemonEnvUpdates[spec.apiKeyEnv]);
+        process.stdout.write("[OK] Codex API-key login configured via codex login --with-api-key.\n");
       }
-    }
-
-    if (shouldRunProviderSetup) {
-      for (const spec of providerSpecs) {
-        const authMode = await promptProviderAuthMode(spec);
-        providerAuthModes.set(spec.command, authMode);
-
-        if (authMode !== "api_key") {
-          if (spec.label === "Claude" && (process.env.SSH_CONNECTION || process.env.SSH_CLIENT || process.env.SSH_TTY)) {
-            process.stdout.write("[WARN] Claude auth_login on SSH/headless hosts may hang after browser auth; api_key is more reliable.\n");
-          }
-          continue;
-        }
-
-        process.stdout.write(`${spec.label} API key URL: ${spec.apiKeyUrl}\n`);
-        const existing = process.env[spec.apiKeyEnv]?.trim() ?? "";
-        const keyPrompt = existing ? `Paste ${spec.apiKeyEnv} (leave empty to keep current value)` : `Paste ${spec.apiKeyEnv}`;
-        const entered = (await promptText(keyPrompt)).trim();
-        const finalKey = entered || existing;
-        if (!finalKey) {
-          process.stdout.write(`[WARN] No ${spec.apiKeyEnv} provided. Falling back to native ${spec.label} auth login.\n`);
-          providerAuthModes.set(spec.command, "auth_login");
-          continue;
-        }
-
-        daemonEnvUpdates[spec.apiKeyEnv] = finalKey;
-        process.env[spec.apiKeyEnv] = finalKey;
-        if (spec.label === "Codex") {
-          await configureCodexApiKeyLogin(spec.command, finalKey);
-          process.stdout.write("[OK] Codex API-key login configured via codex login --with-api-key.\n");
-        }
-        process.stdout.write(`[OK] ${spec.apiKeyEnv} configured for ${spec.label}.\n`);
-      }
-
-      for (const spec of providerSpecs) {
-        const exists = await commandExists(spec.command);
-        if (!exists) {
-          process.stdout.write(`[WARN] Skipping ${spec.label} setup because '${spec.command}' is missing.\n`);
-          continue;
-        }
-
-        const authMode = providerAuthModes.get(spec.command) ?? (process.env[spec.apiKeyEnv]?.trim() ? "api_key" : "auth_login");
-        if (authMode === "api_key" && process.env[spec.apiKeyEnv]?.trim()) {
-          process.stdout.write(`[OK] Using ${spec.apiKeyEnv} for ${spec.label}. Skipping auth login.\n`);
-          continue;
-        }
-
-        process.stdout.write(`Running native ${spec.label} setup...\n`);
-        await runProviderSetupWithArgs(spec.command, spec.setupArgs);
-      }
+      process.stdout.write(`[OK] Using ${spec.apiKeyEnv} for ${spec.label}.\n`);
     }
 
     await installSystemdUnit(projectRoot, cfg, daemonEnvUpdates);
@@ -746,7 +827,7 @@ program
 program
   .command("start")
   .action(async (_, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     const { cfg } = await loadProjectConfig(projectRoot);
     const result = await runInteractiveCommand("bash", ["-lc", `sudo systemctl start ${cfg.runtime.serviceName}`]);
     if (result !== 0) {
@@ -758,7 +839,7 @@ program
 program
   .command("stop")
   .action(async (_, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     const { cfg } = await loadProjectConfig(projectRoot);
     const result = await runInteractiveCommand("bash", ["-lc", `sudo systemctl stop ${cfg.runtime.serviceName}`]);
     if (result !== 0) {
@@ -770,7 +851,7 @@ program
 program
   .command("restart")
   .action(async (_, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     const { cfg } = await loadProjectConfig(projectRoot);
     const result = await runInteractiveCommand("bash", ["-lc", `sudo systemctl restart ${cfg.runtime.serviceName}`]);
     if (result !== 0) {
@@ -781,18 +862,41 @@ program
 
 program
   .command("status")
-  .action(async (_, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+  .option("--json", "Emit machine-readable JSON", false)
+  .action(async (opts, cmd) => {
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     const { cfg } = await loadProjectConfig(projectRoot);
     const result = await runCommand("bash", ["-lc", `systemctl is-active ${cfg.runtime.serviceName}`], { timeoutMs: 3_000 });
-    process.stdout.write((result.stdout.trim() || "unknown") + "\n");
+    const active = result.stdout.trim() || "unknown";
+    const asJson = opts.json as boolean;
+    if (asJson) {
+      process.stdout.write(
+        JSON.stringify(
+          {
+            projectRoot,
+            serviceName: cfg.runtime.serviceName,
+            active,
+            telegram: {
+              botUsername: cfg.telegram.botUsername ?? null,
+              allowGroups: cfg.telegram.allowGroups,
+              groupMode: cfg.telegram.groupMode
+            },
+            providers: cfg.agents.enabled
+          },
+          null,
+          2
+        ) + "\n"
+      );
+      return;
+    }
+    process.stdout.write(active + "\n");
   });
 
 program
   .command("logs")
   .option("--follow", "Follow logs", false)
   .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     const { cfg } = await loadProjectConfig(projectRoot);
     const args = opts.follow ? ["-u", cfg.runtime.serviceName, "-f"] : ["-u", cfg.runtime.serviceName, "-n", "200"];
     const proc = spawn("journalctl", args, { stdio: "inherit" });
@@ -932,12 +1036,12 @@ userCommand
   .requiredOption("--telegram-user-id <id>", "Telegram user ID")
   .option("--username <name>", "Telegram username")
   .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     await userAddAction(opts.telegramUserId, projectRoot, opts.username);
   });
 
 userCommand.command("list").action(async (_, cmd) => {
-  const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+  const projectRoot = resolveProjectRootFromCommand(cmd);
   await userListAction(projectRoot);
 });
 
@@ -945,12 +1049,12 @@ userCommand
   .command("revoke")
   .requiredOption("--telegram-user-id <id>", "Telegram user ID")
   .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     await userRevokeAction(opts.telegramUserId, projectRoot);
   });
 
 userCommand.command("requests").action(async (_, cmd) => {
-  const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+  const projectRoot = resolveProjectRootFromCommand(cmd);
   await userRequestsAction(projectRoot);
 });
 
@@ -958,7 +1062,7 @@ userCommand
   .command("approve")
   .requiredOption("--telegram-user-id <id>", "Telegram user ID")
   .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     await userApproveAction(opts.telegramUserId, projectRoot);
   });
 
@@ -968,12 +1072,12 @@ program
   .requiredOption("--telegram-user-id <id>", "Telegram user ID")
   .option("--username <name>", "Telegram username")
   .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     await userAddAction(opts.telegramUserId, projectRoot, opts.username);
   });
 
 program.command("user:list").action(async (_, cmd) => {
-  const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+  const projectRoot = resolveProjectRootFromCommand(cmd);
   await userListAction(projectRoot);
 });
 
@@ -981,12 +1085,12 @@ program
   .command("user:revoke")
   .requiredOption("--telegram-user-id <id>", "Telegram user ID")
   .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     await userRevokeAction(opts.telegramUserId, projectRoot);
   });
 
 program.command("user:requests").action(async (_, cmd) => {
-  const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+  const projectRoot = resolveProjectRootFromCommand(cmd);
   await userRequestsAction(projectRoot);
 });
 
@@ -994,7 +1098,7 @@ program
   .command("user:approve")
   .requiredOption("--telegram-user-id <id>", "Telegram user ID")
   .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     await userApproveAction(opts.telegramUserId, projectRoot);
   });
 
@@ -1006,7 +1110,7 @@ chatCommand
   .option("--type <private|group|supergroup|channel>", "Chat type", "supergroup")
   .option("--title <title>", "Optional chat title")
   .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     const type = opts.type as AllowedChatRecord["chatType"];
     if (!["private", "group", "supergroup", "channel"].includes(type)) {
       throw new Error(`Invalid chat type: ${opts.type}`);
@@ -1018,30 +1122,57 @@ chatCommand
   .command("revoke")
   .requiredOption("--chat-id <id>", "Telegram chat ID")
   .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     await chatRevokeAction(opts.chatId, projectRoot);
   });
 
 chatCommand.command("list").action(async (_, cmd) => {
-  const projectRoot = resolveProjectRoot(cmd.parent?.parent?.opts().projectRoot);
+  const projectRoot = resolveProjectRootFromCommand(cmd);
   await chatListAction(projectRoot);
 });
 
 program
   .command("doctor")
-  .action(async (_, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+  .option("--verbose", "Print full failure details", false)
+  .action(async (opts, cmd) => {
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     const { cfg } = await loadProjectConfig(projectRoot);
     const checks = await doctorChecks(projectRoot, cfg);
+    const verbose = opts.verbose as boolean;
     for (const check of checks) {
-      process.stdout.write(`${check.ok ? "[OK]" : "[WARN]"} ${check.name}: ${check.details}\n`);
+      const details = verbose || check.ok ? check.details : check.details.split("\n")[0];
+      process.stdout.write(`${check.ok ? "[OK]" : "[WARN]"} ${check.name}: ${details}\n`);
     }
+  });
+
+const configCommand = program.command("config").description("Read or update project config values");
+
+configCommand
+  .command("get")
+  .argument("<key>", "Dotted config key")
+  .action(async (key, cmd) => {
+    const projectRoot = resolveProjectRootFromCommand(cmd);
+    const { cfg } = await loadProjectConfig(projectRoot);
+    const value = getConfigValue(cfg, key);
+    process.stdout.write(`${typeof value === "string" ? value : JSON.stringify(value)}\n`);
+  });
+
+configCommand
+  .command("set")
+  .argument("<key>", "Dotted config key")
+  .argument("<value>", "New value")
+  .action(async (key, value, cmd) => {
+    const projectRoot = resolveProjectRootFromCommand(cmd);
+    const { paths, cfg } = await loadProjectConfig(projectRoot);
+    setConfigValue(cfg, key, coerceConfigValue(value));
+    await saveConfig(paths, cfg);
+    process.stdout.write(`Updated ${key}\n`);
   });
 
 program
   .command("update")
   .action(async (__, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     const { cfg } = await loadProjectConfig(projectRoot);
 
     const steps: Array<{ title: string; command: string }> = [
@@ -1086,7 +1217,7 @@ program
   .option("--remove-telegram-state", "Remove telegram token + chat/user allow data from workspace state", false)
   .option("--all", "Remove service, workspace, global link, providers, and telegram state", false)
   .action(async (opts, cmd) => {
-    const projectRoot = resolveProjectRoot(cmd.parent?.opts().projectRoot);
+    const projectRoot = resolveProjectRootFromCommand(cmd);
     const { cfg, paths } = await loadProjectConfig(projectRoot);
 
     const hasClaude = await commandExists("claude");

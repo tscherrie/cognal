@@ -20,7 +20,9 @@ describe("config multi-project defaults", () => {
     expect(cfg.telegram.botTokenEnv).toBe("TELEGRAM_BOT_TOKEN");
     expect(cfg.telegram.receiveTimeoutSec).toBe(30);
     expect(cfg.telegram.allowGroups).toBe(true);
+    expect(cfg.telegram.groupMode).toBe("all");
     expect(cfg.routing.responseChunkSize).toBe(3500);
+    expect(cfg.retention.maxAudioBytes).toBe(100 * 1024 * 1024);
   });
 
   it("migrates legacy signal receive timeout into telegram timeout", () => {

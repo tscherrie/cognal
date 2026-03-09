@@ -21,5 +21,6 @@ export interface ChatAdapter {
   getIdentity(): Promise<TelegramBotIdentity>;
   receive(timeoutSec: number): Promise<InboundChatEvent[]>;
   sendMessage(chatId: string, text: string): Promise<void>;
+  sendTyping(chatId: string): Promise<void>;
   downloadAttachment(fileId: string, targetPath: string): Promise<void>;
 }

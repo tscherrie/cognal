@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { attachmentLimitBytes } from "../config.js";
 import type { CognalConfig } from "../config.js";
 import type { ChatAdapter, InboundChatEvent } from "../adapters/chatAdapter.js";
 import type { SttAdapter } from "../adapters/sttAdapter.js";
@@ -52,7 +53,7 @@ export async function processInboundEvent(args: {
       await chat.sendMessage(event.chatId, `This chat is not allowed. Ask admin to run: cognal chat allow --chat-id ${event.chatId}`);
       return;
     }
-    if (!event.isCommand && !event.isMentioned && !event.isReplyToBot) {
+    if (cfg.telegram.groupMode === "mentions_only" && !event.isCommand && !event.isMentioned && !event.isReplyToBot) {
       return;
     }
   }
@@ -62,6 +63,16 @@ export async function processInboundEvent(args: {
   const stagedAttachments: InboundAttachment[] = [];
   for (let idx = 0; idx < event.attachments.length; idx += 1) {
     const att = event.attachments[idx];
+    const limitBytes = attachmentLimitBytes(cfg, att.type);
+    if (typeof att.sizeBytes === "number" && att.sizeBytes > limitBytes) {
+      await chat.sendMessage(
+        event.chatId,
+        `Attachment rejected: '${att.fileName}' is too large for type '${att.type}'. Limit is ${Math.round(
+          limitBytes / (1024 * 1024)
+        )} MB.`
+      );
+      continue;
+    }
     const downloadPath = path.join(paths.tempDir, `${Date.now()}-${idx}-${safeFileName(att.fileName)}`);
     try {
       await chat.downloadAttachment(att.fileId, downloadPath);
@@ -129,12 +140,23 @@ export async function processInboundEvent(args: {
   }
 
   let responseText: string;
+  let typingTimer: NodeJS.Timeout | null = null;
   try {
+    await chat.sendTyping(event.chatId);
+    typingTimer = setInterval(() => {
+      void chat.sendTyping(event.chatId).catch(() => {
+        // ignore transient typing update failures
+      });
+    }, 4000);
     const output = await manager.sendToActive(user.id, finalPrompt);
     responseText = output.text || "(No textual response from agent.)";
   } catch (err) {
     logger.error("agent send failed", { userId: user.id, error: String(err) });
     responseText = `Agent execution failed: ${String(err)}`;
+  } finally {
+    if (typingTimer) {
+      clearInterval(typingTimer);
+    }
   }
 
   await db.insertMessage(user.id, null, event.chatId, "out", responseText);

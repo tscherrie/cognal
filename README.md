@@ -4,6 +4,15 @@ Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Telegram chats to Claud
 
 Current release line: `v0.2.0`
 
+Current `v0.3.0` work in progress:
+- API-key-only setup
+- Telegram group mode: `all` or `mentions_only`
+- Telegram typing indicator during agent processing
+- Attachment size limits with user-facing rejection messages
+- `cognal status --json`
+- `cognal doctor --verbose`
+- `cognal config get/set`
+
 ## Key behavior
 
 - Multi-project capable on one server (project-scoped `systemd` service per project).
@@ -62,10 +71,10 @@ cognal setup --distro ubuntu
 
 1. Select providers: `claude`, `codex`, `both`.
 2. Ask for Telegram bot token and validate via `getMe`.
-3. Ask whether group/supergroup chats are enabled.
+3. Ask whether group/supergroup chats are enabled and which group mode to use.
 4. Optional onboarding: initial user IDs and group chat IDs.
 5. Install missing provider CLIs automatically (`npm i -g ...`).
-6. Optional provider auth flow (`api_key` or native `auth_login`).
+6. Configure API keys for Claude and Codex.
 7. Create `./.cognal/config.toml`, SQLite state, and install/start project-scoped `systemd` service.
 
 During interactive setup, if no Telegram token is configured yet, Cognal prints a BotFather step-by-step guide in the terminal before asking for the token.
@@ -92,9 +101,7 @@ Setup options:
 cognal setup --providers claude
 cognal setup --providers codex
 cognal setup --providers both
-cognal setup --run-provider-setup
 cognal setup --skip-provider-install
-cognal setup --skip-provider-setup
 ```
 
 ## Core commands
@@ -105,10 +112,15 @@ cognal start
 cognal stop
 cognal restart
 cognal status
+cognal status --json
 cognal logs --follow
 cognal doctor
+cognal doctor --verbose
 cognal update
 cognal uninstall
+
+cognal config get telegram.groupMode
+cognal config set telegram.groupMode mentions_only
 
 cognal user add --telegram-user-id 123456789
 cognal user list
@@ -127,10 +139,9 @@ cognal chat revoke --chat-id -1001234567890
 2. If your user ID is not approved, Cognal replies with your Telegram user ID.
 3. Host admin runs `cognal user approve --telegram-user-id <id>`.
 4. For group use, admin also runs `cognal chat allow --chat-id <id>`.
-5. In private chats all messages are processed. In groups, Cognal processes only:
-   - commands,
-   - mentions,
-   - replies to the bot.
+5. In private chats all messages are processed. In groups, behavior depends on `telegram.groupMode`:
+   - `all`: every message in an allowed group is processed
+   - `mentions_only`: only commands, mentions, and replies to the bot are processed
 
 ## Multi-project usage
 
@@ -173,6 +184,7 @@ Important fields:
 - `telegram.botUsername`
 - `telegram.receiveTimeoutSec`
 - `telegram.allowGroups`
+- `telegram.groupMode`
 - `runtime.serviceName` (project-scoped unit)
 - `agents.enabled` (`claude`, `codex` booleans)
 - `agents.claude.command`, `agents.codex.command`
@@ -180,6 +192,9 @@ Important fields:
 - `routing.responseChunkSize`
 - `stt.apiKeyEnv` (default `OPENAI_API_KEY`)
 - `retention.attachmentsHours`
+- `retention.maxAudioBytes`
+- `retention.maxImageBytes`
+- `retention.maxDocumentBytes`
 
 Daemon env path: `./.cognal/cognald.env`
 
@@ -193,6 +208,7 @@ npm test
 
 - `cognal update` tracks latest versions by design.
 - `cognal doctor` validates Telegram token health and also runs provider smoke checks for enabled Claude/Codex CLIs.
+- `cognal doctor --verbose` prints full failure details.
 - If provider resume fails after updates, Cognal retries with a fresh session.
 - Codex session continuation depends on the installed Codex CLI version. Cognal probes support and degrades safely when resume is unavailable.
 

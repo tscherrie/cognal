@@ -230,6 +230,13 @@ export class TelegramBotAdapter implements ChatAdapter {
     });
   }
 
+  async sendTyping(chatId: string): Promise<void> {
+    await this.callApi("sendChatAction", {
+      chat_id: chatId,
+      action: "typing"
+    });
+  }
+
   async downloadAttachment(fileId: string, targetPath: string): Promise<void> {
     const file = await this.callApi<TelegramGetFileResult>("getFile", { file_id: fileId });
     if (!file.file_path) {

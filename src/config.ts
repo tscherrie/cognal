@@ -5,6 +5,7 @@ import TOML from "@iarna/toml";
 import type { AgentType } from "./types.js";
 
 export type ProviderSelection = "claude" | "codex" | "both";
+export type TelegramGroupMode = "all" | "mentions_only";
 
 export interface EnabledAgents {
   claude: boolean;
@@ -23,6 +24,7 @@ export interface CognalConfig {
     botUsername?: string;
     receiveTimeoutSec: number;
     allowGroups: boolean;
+    groupMode: TelegramGroupMode;
   };
   agents: {
     enabled: EnabledAgents;
@@ -46,6 +48,9 @@ export interface CognalConfig {
   };
   retention: {
     attachmentsHours: number;
+    maxAudioBytes: number;
+    maxImageBytes: number;
+    maxDocumentBytes: number;
   };
   timeouts: {
     agentResponseSec: number;
@@ -102,7 +107,8 @@ export function defaultConfig(projectRoot: string): CognalConfig {
     telegram: {
       botTokenEnv: "TELEGRAM_BOT_TOKEN",
       receiveTimeoutSec: 30,
-      allowGroups: true
+      allowGroups: true,
+      groupMode: "all"
     },
     agents: {
       enabled: {
@@ -128,7 +134,10 @@ export function defaultConfig(projectRoot: string): CognalConfig {
       apiKeyEnv: "OPENAI_API_KEY"
     },
     retention: {
-      attachmentsHours: 24
+      attachmentsHours: 24,
+      maxAudioBytes: 100 * 1024 * 1024,
+      maxImageBytes: 50 * 1024 * 1024,
+      maxDocumentBytes: 100 * 1024 * 1024
     },
     timeouts: {
       agentResponseSec: 240,
@@ -187,7 +196,8 @@ export function normalizeConfig(cfg: CognalConfig, projectRoot = cfg.projectId):
       botTokenEnv: "TELEGRAM_BOT_TOKEN",
       receiveTimeoutSec:
         typeof legacyReceive === "number" && legacyReceive > 0 ? legacyReceive : defaults.telegram.receiveTimeoutSec,
-      allowGroups: true
+      allowGroups: true,
+      groupMode: defaults.telegram.groupMode
     };
   }
   if (!normalized.telegram.botTokenEnv) {
@@ -198,6 +208,9 @@ export function normalizeConfig(cfg: CognalConfig, projectRoot = cfg.projectId):
   }
   if (typeof normalized.telegram.allowGroups !== "boolean") {
     normalized.telegram.allowGroups = true;
+  }
+  if (normalized.telegram.groupMode !== "all" && normalized.telegram.groupMode !== "mentions_only") {
+    normalized.telegram.groupMode = normalized.telegram.allowGroups ? defaults.telegram.groupMode : "mentions_only";
   }
 
   if (!normalized.agents) {
@@ -228,6 +241,18 @@ export function normalizeConfig(cfg: CognalConfig, projectRoot = cfg.projectId):
   }
   if (!normalized.retention) {
     normalized.retention = defaults.retention;
+  }
+  if (!normalized.retention.attachmentsHours || normalized.retention.attachmentsHours <= 0) {
+    normalized.retention.attachmentsHours = defaults.retention.attachmentsHours;
+  }
+  if (!normalized.retention.maxAudioBytes || normalized.retention.maxAudioBytes <= 0) {
+    normalized.retention.maxAudioBytes = defaults.retention.maxAudioBytes;
+  }
+  if (!normalized.retention.maxImageBytes || normalized.retention.maxImageBytes <= 0) {
+    normalized.retention.maxImageBytes = defaults.retention.maxImageBytes;
+  }
+  if (!normalized.retention.maxDocumentBytes || normalized.retention.maxDocumentBytes <= 0) {
+    normalized.retention.maxDocumentBytes = defaults.retention.maxDocumentBytes;
   }
   if (!normalized.timeouts) {
     normalized.timeouts = defaults.timeouts;
@@ -278,6 +303,16 @@ export function getEnabledAgents(cfg: CognalConfig): AgentType[] {
 
 export function isAgentEnabled(cfg: CognalConfig, agent: AgentType): boolean {
   return cfg.agents.enabled[agent];
+}
+
+export function attachmentLimitBytes(cfg: CognalConfig, type: "audio" | "image" | "document"): number {
+  if (type === "audio") {
+    return cfg.retention.maxAudioBytes;
+  }
+  if (type === "image") {
+    return cfg.retention.maxImageBytes;
+  }
+  return cfg.retention.maxDocumentBytes;
 }
 
 export function getDefaultAgent(cfg: CognalConfig): AgentType {

@@ -74,10 +74,15 @@ class FakeManager {
 
 class FakeChat {
   sent: Array<{ chatId: string; text: string }> = [];
+  typing: string[] = [];
   downloadBodies = new Map<string, string>();
 
   async sendMessage(chatId: string, text: string): Promise<void> {
     this.sent.push({ chatId, text });
+  }
+
+  async sendTyping(chatId: string): Promise<void> {
+    this.typing.push(chatId);
   }
 
   async downloadAttachment(fileId: string, targetPath: string): Promise<void> {
@@ -108,7 +113,7 @@ function makeConfig() {
   return {
     projectId: "proj",
     runtime: { osMode: "linux", distro: "ubuntu", serviceName: "svc" },
-    telegram: { botTokenEnv: "TELEGRAM_BOT_TOKEN", botUsername: "mybot", receiveTimeoutSec: 30, allowGroups: true },
+    telegram: { botTokenEnv: "TELEGRAM_BOT_TOKEN", botUsername: "mybot", receiveTimeoutSec: 30, allowGroups: true, groupMode: "all" },
     agents: {
       enabled: { claude: true, codex: true },
       claude: { command: "claude", args: [] },
@@ -116,7 +121,7 @@ function makeConfig() {
     },
     routing: { failoverEnabled: true, responseChunkSize: 5 },
     stt: { provider: "openai", model: "whisper-1", apiKeyEnv: "OPENAI_API_KEY" },
-    retention: { attachmentsHours: 24 },
+    retention: { attachmentsHours: 24, maxAudioBytes: 100 * 1024 * 1024, maxImageBytes: 50 * 1024 * 1024, maxDocumentBytes: 100 * 1024 * 1024 },
     timeouts: { agentResponseSec: 240, failoverRetrySec: 30, agentIdleMs: 1500 }
   } as const;
 }
@@ -149,6 +154,8 @@ describe("processInboundEvent", () => {
     db.allowedChats.add("group1");
     const manager = new FakeManager();
     const chat = new FakeChat();
+    const cfg = makeConfig() as any;
+    cfg.telegram.groupMode = "mentions_only";
 
     await processInboundEvent({
       event: makeEvent({ chatId: "group1", chatType: "supergroup", text: "noise" }),
@@ -156,7 +163,7 @@ describe("processInboundEvent", () => {
       manager: manager as any,
       chat: chat as any,
       stt: null,
-      cfg: makeConfig() as any,
+      cfg,
       paths: { tempDir: path.join(os.tmpdir(), `cognal-inbound-${Date.now()}`) },
       botUsername: "mybot",
       logger: new Logger("test"),
@@ -225,8 +232,43 @@ describe("processInboundEvent", () => {
     expect(manager.prompts[0]).toContain("Incoming attachments:");
     expect(manager.prompts[0]).toContain("Audio transcription failed");
     expect(chat.sent.map((item) => item.text)).toEqual(["12345", "6789"]);
+    expect(chat.typing.length).toBeGreaterThan(0);
 
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("rejects oversized attachments with a user-facing error", async () => {
+    const db = new FakeDb();
+    const manager = new FakeManager();
+    const chat = new FakeChat();
+    const cfg = makeConfig() as any;
+    cfg.retention.maxDocumentBytes = 10;
+
+    await processInboundEvent({
+      event: makeEvent({
+        attachments: [
+          {
+            type: "document",
+            fileId: "doc1",
+            fileName: "big.pdf",
+            contentType: "application/pdf",
+            sizeBytes: 999
+          }
+        ]
+      }),
+      db: db as any,
+      manager: manager as any,
+      chat: chat as any,
+      stt: null,
+      cfg,
+      paths: { tempDir: path.join(os.tmpdir(), `cognal-inbound-${Date.now()}`) },
+      botUsername: "mybot",
+      logger: new Logger("test"),
+      isAgentEnabled: () => true
+    });
+
+    expect(chat.sent[0]?.text).toContain("Attachment rejected");
+    expect(db.attachments).toHaveLength(0);
   });
 });
 
