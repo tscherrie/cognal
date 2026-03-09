@@ -253,7 +253,8 @@ export class TelegramBotAdapter implements ChatAdapter {
       body: JSON.stringify(payload)
     });
     if (!response.ok) {
-      throw new Error(`Telegram API ${method} failed (${response.status})`);
+      const detail = (await response.text()).trim();
+      throw new Error(`Telegram API ${method} failed (${response.status})${detail ? `: ${detail}` : ""}`);
     }
     const json = (await response.json()) as TelegramApiResponse<T>;
     if (!json.ok || json.result === undefined) {

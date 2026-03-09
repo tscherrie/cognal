@@ -1,15 +1,7 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { AgentType, AgentOutput } from "../types.js";
 import { runCommand } from "../core/utils.js";
-import type { AgentAdapter, AgentStartOptions, RunningAgent } from "./agentAdapter.js";
-
-function createHolderProcess(): ChildProcessWithoutNullStreams {
-  return spawn("bash", ["-lc", "sleep 2147483647"], {
-    stdio: "pipe",
-    env: process.env
-  });
-}
+import { createLogicalProcess, extractSessionRef, type AgentAdapter, type AgentStartOptions, type RunningAgent } from "./agentAdapter.js";
 
 export class ClaudeAdapter implements AgentAdapter {
   readonly type: AgentType = "claude";
@@ -17,47 +9,61 @@ export class ClaudeAdapter implements AgentAdapter {
   constructor(private readonly command: string, private readonly baseArgs: string[] = []) {}
 
   async start(options: AgentStartOptions): Promise<RunningAgent> {
-    const proc = createHolderProcess();
     return {
       agent: this.type,
       userId: options.userId,
-      process: proc,
+      process: createLogicalProcess(),
       sessionRef: options.fresh ? null : options.sessionRef,
-      outputBuffer: ""
+      outputBuffer: "",
+      startMode: options.fresh || !options.sessionRef ? "fresh" : "resume"
     };
   }
 
   async send(runtime: RunningAgent, input: string, _idleMs: number, timeoutMs: number): Promise<AgentOutput> {
-    const sessionRef = runtime.sessionRef ?? randomUUID();
-    const args = [...this.baseArgs, "--print", "--session-id", sessionRef, input];
-    const result = await runCommand(this.command, args, {
-      timeoutMs,
-      env: process.env
-    });
+    const trimmedInput = input.trim();
+    const attemptResume = runtime.startMode === "resume" && Boolean(runtime.sessionRef);
 
-    if (result.code !== 0) {
-      const detail = (result.stderr || result.stdout || "no output").trim();
-      throw new Error(`claude --print failed (${result.code}): ${detail}`);
+    if (attemptResume && runtime.sessionRef) {
+      const resumed = await this.runClaude([...this.baseArgs, "--print", "--resume", runtime.sessionRef, trimmedInput], timeoutMs);
+      if (resumed.code === 0) {
+        const resumedRef = extractSessionRef(`${resumed.stdout}\n${resumed.stderr}`) ?? runtime.sessionRef;
+        runtime.sessionRef = resumedRef;
+        runtime.startMode = "resume";
+        runtime.outputBuffer += resumed.stdout;
+        return {
+          text: resumed.stdout.trim(),
+          sessionRef: resumedRef
+        };
+      }
     }
 
-    runtime.sessionRef = sessionRef;
-    runtime.outputBuffer += result.stdout;
+    const sessionRef = randomUUID();
+    const fresh = await this.runClaude([...this.baseArgs, "--print", "--session-id", sessionRef, trimmedInput], timeoutMs);
+    if (fresh.code !== 0) {
+      const detail = (fresh.stderr || fresh.stdout || "no output").trim();
+      throw new Error(`claude --print failed (${fresh.code}): ${detail}`);
+    }
+
+    const finalSessionRef = extractSessionRef(`${fresh.stdout}\n${fresh.stderr}`) ?? sessionRef;
+    runtime.sessionRef = finalSessionRef;
+    runtime.startMode = "resume";
+    runtime.outputBuffer += fresh.stdout;
 
     return {
-      text: result.stdout.trim(),
-      sessionRef
+      text: fresh.stdout.trim(),
+      sessionRef: finalSessionRef
     };
   }
 
   async stop(runtime: RunningAgent): Promise<string | null> {
-    const proc = runtime.process;
-    if (proc.exitCode === null && !proc.killed) {
-      try {
-        proc.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-    }
+    runtime.process.kill("SIGTERM");
     return runtime.sessionRef;
+  }
+
+  private async runClaude(args: string[], timeoutMs: number) {
+    return await runCommand(this.command, args, {
+      timeoutMs,
+      env: process.env
+    });
   }
 }

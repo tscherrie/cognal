@@ -533,7 +533,7 @@ export class Db {
     await this.run(`UPDATE attachments SET deleted_at = ? WHERE path = ?`, [new Date().toISOString(), filePath]);
   }
 
-  async setRuntimePid(userId: string, agent: AgentType, pid: number): Promise<void> {
+  async setRuntimePid(userId: string, agent: AgentType, pid: number | null): Promise<void> {
     await this.run(
       `INSERT INTO agent_runtime (user_id, agent, pid, started_at, stopped_at, last_error)
        VALUES (?, ?, ?, ?, NULL, NULL)

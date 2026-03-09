@@ -6,6 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import {
   loadOrCreateConfig,
   getRuntimePaths,
@@ -528,6 +529,49 @@ async function doctorChecks(projectRoot: string, cfg: CognalConfig): Promise<Hea
     }
   } else {
     checks.push({ name: "telegram:getMe", ok: false, details: "skipped (missing token)" });
+  }
+
+  const providerEnv = {
+    ...process.env,
+    ...daemonEnv
+  };
+
+  if (cfg.agents.enabled.claude && (await commandExists(cfg.agents.claude.command))) {
+    const probe = await runCommand(cfg.agents.claude.command, ["--print", "Reply exactly: COGNAL_DOCTOR_OK"], {
+      cwd: projectRoot,
+      env: providerEnv,
+      timeoutMs: 45_000
+    });
+    const ok = probe.code === 0 && probe.stdout.includes("COGNAL_DOCTOR_OK");
+    checks.push({
+      name: "provider:claude",
+      ok,
+      details: ok ? "ok" : (probe.stderr || probe.stdout || `exit ${probe.code}`).trim()
+    });
+  }
+
+  if (cfg.agents.enabled.codex && (await commandExists(cfg.agents.codex.command))) {
+    const lastMessagePath = path.join(paths.tempDir, `doctor-codex-last-${randomUUID()}.txt`);
+    const probe = await runCommand(
+      cfg.agents.codex.command,
+      ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "--output-last-message", lastMessagePath, "Reply exactly: COGNAL_DOCTOR_OK"],
+      {
+        cwd: projectRoot,
+        env: providerEnv,
+        timeoutMs: 60_000
+      }
+    );
+    const ok = probe.code === 0 && (probe.stdout.includes("COGNAL_DOCTOR_OK") || probe.stderr.includes("COGNAL_DOCTOR_OK"));
+    checks.push({
+      name: "provider:codex",
+      ok,
+      details: ok ? "ok" : (probe.stderr || probe.stdout || `exit ${probe.code}`).trim()
+    });
+    try {
+      await fs.unlink(lastMessagePath);
+    } catch {
+      // ignore
+    }
   }
 
   const serviceName = cfg.runtime.serviceName;

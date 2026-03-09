@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { EventEmitter } from "node:events";
 import type { AgentType } from "../src/types.js";
-import type { AgentAdapter, RunningAgent } from "../src/agents/agentAdapter.js";
+import type { AgentAdapter, AgentStartOptions, RunningAgent } from "../src/agents/agentAdapter.js";
 import { AgentManager } from "../src/agents/manager.js";
 
 class FakeDb {
@@ -34,17 +33,15 @@ class FakeDb {
 }
 
 function fakeRuntime(agent: AgentType): RunningAgent {
-  const stdout = new EventEmitter() as any;
-  const stderr = new EventEmitter() as any;
   const proc: any = {
-    pid: Math.floor(Math.random() * 10000),
-    stdout,
-    stderr,
-    stdin: {
-      write: () => true
-    },
+    pid: null,
     exitCode: null,
-    killed: false
+    killed: false,
+    kill() {
+      this.killed = true;
+      this.exitCode = 0;
+      return true;
+    }
   };
 
   return {
@@ -52,7 +49,8 @@ function fakeRuntime(agent: AgentType): RunningAgent {
     userId: "u1",
     process: proc,
     sessionRef: null,
-    outputBuffer: ""
+    outputBuffer: "",
+    startMode: "fresh"
   };
 }
 
@@ -60,15 +58,25 @@ class FakeAdapter implements AgentAdapter {
   starts = 0;
   stops = 0;
   sends = 0;
+  startOptions: AgentStartOptions[] = [];
 
   constructor(public readonly type: AgentType, private readonly behavior: {
+    failStart?: boolean;
     failSend?: boolean;
     sendText?: string;
+    sessionRef?: string | null;
   } = {}) {}
 
-  async start(): Promise<RunningAgent> {
+  async start(options: AgentStartOptions): Promise<RunningAgent> {
     this.starts += 1;
-    return fakeRuntime(this.type);
+    this.startOptions.push({ ...options });
+    if (this.behavior.failStart && !options.fresh) {
+      throw new Error(`resume start failure ${this.type}`);
+    }
+    const runtime = fakeRuntime(this.type);
+    runtime.sessionRef = options.fresh ? null : options.sessionRef;
+    runtime.startMode = options.fresh || !options.sessionRef ? "fresh" : "resume";
+    return runtime;
   }
 
   async send(_runtime: RunningAgent, _input: string): Promise<{ text: string; sessionRef?: string | null }> {
@@ -78,7 +86,7 @@ class FakeAdapter implements AgentAdapter {
     }
     return {
       text: this.behavior.sendText ?? `${this.type}-ok`,
-      sessionRef: `${this.type}-session`
+      sessionRef: this.behavior.sessionRef ?? `${this.type}-session`
     };
   }
 
@@ -127,6 +135,46 @@ describe("AgentManager", () => {
     expect(output.text).toContain("Failover -> claude");
     expect(output.text).toContain("fallback-response");
     expect(db.binding.activeAgent).toBe("claude");
+  });
+
+  it("starts with persisted session refs when switching back", async () => {
+    const db = new FakeDb();
+    db.binding.codexSessionRef = "codex-prev";
+    db.binding.claudeSessionRef = "claude-prev";
+
+    const codex = new FakeAdapter("codex");
+    const claude = new FakeAdapter("claude");
+
+    const manager = new AgentManager(
+      db as any,
+      { codex, claude },
+      { failoverEnabled: true, agentResponseSec: 10, agentIdleMs: 10, defaultAgent: "codex" }
+    );
+
+    await manager.switchAgent("u1", "claude");
+    await manager.switchAgent("u1", "codex");
+
+    expect(claude.startOptions[0]).toMatchObject({ sessionRef: "claude-prev", fresh: false });
+    expect(codex.startOptions[0]).toMatchObject({ sessionRef: "codex-prev", fresh: false });
+  });
+
+  it("retries fresh start when resume start fails", async () => {
+    const db = new FakeDb();
+    db.binding.claudeSessionRef = "claude-prev";
+
+    const claude = new FakeAdapter("claude", { failStart: true });
+    const manager = new AgentManager(
+      db as any,
+      { claude },
+      { failoverEnabled: false, agentResponseSec: 10, agentIdleMs: 10, defaultAgent: "claude" }
+    );
+
+    await manager.switchAgent("u1", "claude");
+
+    expect(claude.startOptions).toEqual([
+      { userId: "u1", sessionRef: "claude-prev", fresh: false },
+      { userId: "u1", sessionRef: null, fresh: true }
+    ]);
   });
 
   it("rejects switching to disabled provider", async () => {

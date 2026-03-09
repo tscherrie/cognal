@@ -148,7 +148,7 @@ export class AgentManager {
 
     try {
       const runtime = await adapter.start({ userId, sessionRef, fresh: false });
-      await this.db.setRuntimePid(userId, agent, runtime.process.pid ?? -1);
+      await this.db.setRuntimePid(userId, agent, runtime.process.pid ?? null);
       return runtime;
     } catch (resumeErr) {
       this.logger.warn("resume start failed, retrying fresh", {
@@ -157,7 +157,7 @@ export class AgentManager {
         error: String(resumeErr)
       });
       const runtime = await adapter.start({ userId, sessionRef: null, fresh: true });
-      await this.db.setRuntimePid(userId, agent, runtime.process.pid ?? -1);
+      await this.db.setRuntimePid(userId, agent, runtime.process.pid ?? null);
       return runtime;
     }
   }

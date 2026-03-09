@@ -1,43 +1,44 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AgentType, AgentOutput } from "../types.js";
 import { runCommand } from "../core/utils.js";
-import type { AgentAdapter, AgentStartOptions, RunningAgent } from "./agentAdapter.js";
-
-function createHolderProcess(): ChildProcessWithoutNullStreams {
-  return spawn("bash", ["-lc", "sleep 2147483647"], {
-    stdio: "pipe",
-    env: process.env
-  });
-}
+import { createLogicalProcess, extractSessionRef, type AgentAdapter, type AgentStartOptions, type RunningAgent } from "./agentAdapter.js";
 
 export class CodexAdapter implements AgentAdapter {
   readonly type: AgentType = "codex";
+  private resumeSupport: boolean | null = null;
 
   constructor(private readonly command: string, private readonly baseArgs: string[] = []) {}
 
   async start(options: AgentStartOptions): Promise<RunningAgent> {
-    const proc = createHolderProcess();
+    const supportsResume = await this.supportsResume();
     return {
       agent: this.type,
       userId: options.userId,
-      process: proc,
+      process: createLogicalProcess(),
       sessionRef: options.fresh ? null : options.sessionRef,
-      outputBuffer: ""
+      outputBuffer: "",
+      startMode: !options.fresh && Boolean(options.sessionRef) && supportsResume ? "resume" : "fresh"
     };
   }
 
   async send(runtime: RunningAgent, input: string, _idleMs: number, timeoutMs: number): Promise<AgentOutput> {
     const lastMessagePath = path.join(os.tmpdir(), `cognal-codex-last-${randomUUID()}.txt`);
     try {
-      const args = [...this.baseArgs, "exec", "--output-last-message", lastMessagePath, input];
-      const result = await runCommand(this.command, args, {
-        timeoutMs,
-        env: process.env
-      });
+      const trimmedInput = input.trim();
+      let result;
+      if (runtime.startMode === "resume" && runtime.sessionRef) {
+        result = await this.runCodex([...this.baseArgs, "exec", "resume", runtime.sessionRef, "--output-last-message", lastMessagePath, trimmedInput], timeoutMs);
+        if (result.code !== 0) {
+          runtime.startMode = "fresh";
+        }
+      }
+
+      if (!result || result.code !== 0) {
+        result = await this.runCodex([...this.baseArgs, "exec", "--output-last-message", lastMessagePath, trimmedInput], timeoutMs);
+      }
 
       let lastMessage = "";
       try {
@@ -52,10 +53,13 @@ export class CodexAdapter implements AgentAdapter {
       }
 
       const text = lastMessage || result.stdout.trim();
+      const sessionRef = extractSessionRef(`${result.stdout}\n${result.stderr}`) ?? runtime.sessionRef;
+      runtime.sessionRef = sessionRef;
+      runtime.startMode = sessionRef ? "resume" : "fresh";
       runtime.outputBuffer += text;
       return {
         text,
-        sessionRef: runtime.sessionRef
+        sessionRef
       };
     } finally {
       try {
@@ -67,14 +71,28 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async stop(runtime: RunningAgent): Promise<string | null> {
-    const proc = runtime.process;
-    if (proc.exitCode === null && !proc.killed) {
-      try {
-        proc.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-    }
+    runtime.process.kill("SIGTERM");
     return runtime.sessionRef;
+  }
+
+  private async supportsResume(): Promise<boolean> {
+    if (this.resumeSupport !== null) {
+      return this.resumeSupport;
+    }
+
+    const probe = await runCommand(this.command, ["exec", "resume", "--help"], {
+      timeoutMs: 5_000,
+      env: process.env
+    });
+    const output = `${probe.stdout}\n${probe.stderr}`;
+    this.resumeSupport = /Usage:\s+codex\s+exec\s+resume\b/i.test(output);
+    return this.resumeSupport;
+  }
+
+  private async runCodex(args: string[], timeoutMs: number) {
+    return await runCommand(this.command, args, {
+      timeoutMs,
+      env: process.env
+    });
   }
 }

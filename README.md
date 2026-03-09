@@ -9,7 +9,8 @@ Cognal is a Ubuntu/Debian-only CLI + daemon that bridges Telegram chats to Claud
 - `/claude` and `/codex` switch the active agent per user.
 - All other slash commands are passed through unchanged.
 - Single-active-agent policy per user (RAM saving).
-- Session resume across agent restarts (`claude --resume/--continue`, `codex resume`).
+- Session resume across agent restarts where supported by the installed provider CLI.
+- Claude resume is implemented via `--resume`; Codex resume is capability-detected and falls back to fresh `exec` on CLIs without resume support.
 - Audio transcription via OpenAI `whisper-1` (auto language).
 - Attachments are temporary and cleaned up by TTL.
 - Access control: user allow-list (`telegram_user_id`) + group allow-list (`chat_id`).
@@ -189,4 +190,6 @@ npm test
 ## Notes
 
 - `cognal update` tracks latest versions by design.
-- If provider resume fails after updates, Cognal retries with a fresh session and sends a failover marker.
+- `cognal doctor` validates Telegram token health and also runs provider smoke checks for enabled Claude/Codex CLIs.
+- If provider resume fails after updates, Cognal retries with a fresh session.
+- Codex session continuation depends on the installed Codex CLI version. Cognal probes support and degrades safely when resume is unavailable.
