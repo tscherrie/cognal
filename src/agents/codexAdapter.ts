@@ -26,7 +26,7 @@ export class CodexAdapter implements AgentAdapter {
 
   async send(runtime: RunningAgent, input: string, _idleMs: number, timeoutMs: number): Promise<AgentOutput> {
     const lastMessagePath = path.join(os.tmpdir(), `cognal-codex-last-${randomUUID()}.txt`);
-    const execArgs = ["exec", "--skip-git-repo-check"];
+    const execArgs = ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"];
     try {
       const trimmedInput = input.trim();
       let result;
