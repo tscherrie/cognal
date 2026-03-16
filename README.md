@@ -78,6 +78,7 @@ cognal setup --distro ubuntu
 5. Install missing provider CLIs automatically (`npm i -g ...`).
 6. Configure API keys for Claude and Codex.
 7. Create `./.cognal/config.toml`, SQLite state, and install/start project-scoped `systemd` service.
+8. Create or update project-root `AGENTS.md` and `CLAUDE.md` with Cognal's default live-verification rule.
 
 During interactive setup, if no Telegram token is configured yet, Cognal prints a BotFather step-by-step guide in the terminal before asking for the token.
 

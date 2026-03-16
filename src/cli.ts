@@ -22,6 +22,7 @@ import type { CognalConfig, ProviderSelection, TelegramGroupMode } from "./confi
 import { Db } from "./core/db.js";
 import { commandExists, runCommand, runInteractiveCommand, resolveCommandPath } from "./core/utils.js";
 import { Logger } from "./core/logger.js";
+import { ensureProjectInstructionFiles } from "./core/projectInstructions.js";
 import type { AllowedChatRecord, HealthCheckResult } from "./types.js";
 import { TelegramBotAdapter } from "./adapters/telegramBotAdapter.js";
 
@@ -777,6 +778,7 @@ program
 
     await saveConfig(paths, cfg);
     await upsertDaemonEnv(envPath, daemonEnvUpdates);
+    await ensureProjectInstructionFiles(projectRoot);
 
     process.stdout.write(`Provider mode: ${selectedProviders}\n`);
     process.stdout.write(`Telegram bot: @${identity.username}\n`);
