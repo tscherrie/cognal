@@ -26,18 +26,22 @@ export class CodexAdapter implements AgentAdapter {
 
   async send(runtime: RunningAgent, input: string, _idleMs: number, timeoutMs: number): Promise<AgentOutput> {
     const lastMessagePath = path.join(os.tmpdir(), `cognal-codex-last-${randomUUID()}.txt`);
+    const execArgs = ["exec", "--skip-git-repo-check"];
     try {
       const trimmedInput = input.trim();
       let result;
       if (runtime.startMode === "resume" && runtime.sessionRef) {
-        result = await this.runCodex([...this.baseArgs, "exec", "resume", runtime.sessionRef, "--output-last-message", lastMessagePath, trimmedInput], timeoutMs);
+        result = await this.runCodex(
+          [...this.baseArgs, ...execArgs, "resume", runtime.sessionRef, "--output-last-message", lastMessagePath, trimmedInput],
+          timeoutMs
+        );
         if (result.code !== 0) {
           runtime.startMode = "fresh";
         }
       }
 
       if (!result || result.code !== 0) {
-        result = await this.runCodex([...this.baseArgs, "exec", "--output-last-message", lastMessagePath, trimmedInput], timeoutMs);
+        result = await this.runCodex([...this.baseArgs, ...execArgs, "--output-last-message", lastMessagePath, trimmedInput], timeoutMs);
       }
 
       let lastMessage = "";
@@ -80,7 +84,7 @@ export class CodexAdapter implements AgentAdapter {
       return this.resumeSupport;
     }
 
-    const probe = await runCommand(this.command, ["exec", "resume", "--help"], {
+    const probe = await runCommand(this.command, ["exec", "--skip-git-repo-check", "resume", "--help"], {
       timeoutMs: 5_000,
       env: process.env
     });
